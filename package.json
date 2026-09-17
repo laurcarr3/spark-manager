@@ -1,0 +1,23 @@
+{
+  "name": "spark-manager",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local model management for NVIDIA DGX Spark",
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "dev:api": "pnpm --filter @spark-manager/api dev",
+    "dev:cli": "pnpm --filter @spark-manager/cli dev",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

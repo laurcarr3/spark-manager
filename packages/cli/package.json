@@ -1,0 +1,15 @@
+{
+  "name": "@spark-manager/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "spark-manager": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@spark-manager/core": "workspace:*"
+  }
+}
