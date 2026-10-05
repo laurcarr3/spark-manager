@@ -30,7 +30,7 @@ export class ModelCommandError extends Error {
 
 const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
 const DEFAULT_START_COMMAND = ["./start.sh"] as const;
-const DEFAULT_STOP_COMMAND = ["./start.sh", "stop"] as const;
+const DEFAULT_STOP_COMMAND = ["./stop.sh"] as const;
 
 export async function getModelStatus(
   options: ModelCommandOptions,

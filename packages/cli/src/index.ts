@@ -19,7 +19,7 @@ Usage:
 
 Commands:
   start      Run ./start.sh in a model workspace
-  stop       Run ./start.sh stop in a model workspace
+  stop       Run ./stop.sh in a model workspace
   status     Run ./start.sh ps in a model workspace
   help       Show this help message
   version    Show the current version

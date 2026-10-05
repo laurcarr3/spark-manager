@@ -28,8 +28,8 @@ pnpm dev:api
 ## Model workspace
 
 Pass the path to a checked-out model recipe directly to the CLI. The start,
-stop, and status commands run `./start.sh`, `./start.sh stop`, and
-`./start.sh ps`, respectively, in that workspace without invoking a shell.
+stop, and status commands run `./start.sh`, `./stop.sh`, and `./start.sh ps`,
+respectively, in that workspace without invoking a shell.
 
 ```bash
 pnpm dev:cli start \
