@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -17,15 +19,14 @@ export interface CommandResult {
 }
 
 export interface ModelCommandOptions {
-  workspaceDir: string;
+  displayName: string;
   command?: readonly string[];
+  registryPath?: string;
 }
 
-export class ModelCommandError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "ModelCommandError";
-  }
+export interface RegisteredModel {
+  displayName: string;
+  workspaceDirectory: string;
 }
 
 const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
@@ -36,7 +37,7 @@ export async function getModelStatus(
   options: ModelCommandOptions,
 ): Promise<CommandResult> {
   return runModelCommand(
-    options.workspaceDir,
+    options,
     options.command ?? DEFAULT_STATUS_COMMAND,
     "Status",
   );
@@ -46,7 +47,7 @@ export async function startModel(
   options: ModelCommandOptions,
 ): Promise<CommandResult> {
   return runModelCommand(
-    options.workspaceDir,
+    options,
     options.command ?? DEFAULT_START_COMMAND,
     "Start",
   );
@@ -56,22 +57,26 @@ export async function stopModel(
   options: ModelCommandOptions,
 ): Promise<CommandResult> {
   return runModelCommand(
-    options.workspaceDir,
+    options,
     options.command ?? DEFAULT_STOP_COMMAND,
     "Stop",
   );
 }
 
 async function runModelCommand(
-  requestedWorkspaceDir: string,
+  options: ModelCommandOptions,
   command: readonly string[],
   commandName: string,
 ): Promise<CommandResult> {
-  const workspaceDir = await resolveWorkspace(requestedWorkspaceDir);
+  const model = await getRegisteredModel(
+    options.displayName,
+    options.registryPath,
+  );
+  const workspaceDir = await resolveWorkspace(model.workspaceDirectory);
   const [executable, ...args] = command;
 
   if (!executable) {
-    throw new ModelCommandError(`${commandName} command must not be empty.`);
+    throw new Error(`${commandName} command must not be empty.`);
   }
 
   return new Promise((resolve, reject) => {
@@ -95,7 +100,7 @@ async function runModelCommand(
 
     child.once("error", (error) => {
       reject(
-        new ModelCommandError(
+        new Error(
           `Unable to run ${commandName.toLowerCase()} command in ${workspaceDir}: ${error.message}`,
           { cause: error },
         ),
@@ -107,6 +112,71 @@ async function runModelCommand(
   });
 }
 
+export async function getRegisteredModel(
+  displayName: string,
+  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+): Promise<RegisteredModel> {
+  if (!displayName.trim()) {
+    throw new Error("Model display name must not be empty.");
+  }
+
+  const registry = await readRegistry(registryPath);
+  const model = registry.find((entry) => entry.displayName === displayName);
+  if (!model) {
+    throw new Error(
+      `Unknown display name ${JSON.stringify(displayName)} in ${registryPath}.`,
+    );
+  }
+  return model;
+}
+
+async function readRegistry(registryPath: string): Promise<RegisteredModel[]> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(registryPath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Unable to read model registry ${registryPath}: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(
+      `Invalid model registry ${registryPath}: expected a JSON object.`,
+    );
+  }
+
+  return Object.entries(value).map(([displayName, entry]) => {
+    if (!displayName.trim()) {
+      throw new Error(
+        `Invalid model registry ${registryPath}: model ${JSON.stringify(displayName)} must have a non-empty workspaceDirectory string.`,
+      );
+    }
+    return parseRegistryEntry(registryPath, displayName, entry);
+  });
+}
+
+function parseRegistryEntry(
+  registryPath: string,
+  displayName: string,
+  entry: unknown,
+): RegisteredModel {
+  if (
+    typeof entry !== "object" ||
+    entry === null ||
+    !("workspaceDirectory" in entry) ||
+    typeof entry.workspaceDirectory !== "string" ||
+    !entry.workspaceDirectory.trim()
+  ) {
+    throw new Error(
+      `Invalid model registry ${registryPath}: model ${JSON.stringify(displayName)} must have a non-empty workspaceDirectory string.`,
+    );
+  }
+
+  return { displayName, workspaceDirectory: entry.workspaceDirectory };
+}
+
 async function resolveWorkspace(workspaceDir: string): Promise<string> {
   try {
     const workspaceStats = await stat(workspaceDir);
@@ -115,7 +185,7 @@ async function resolveWorkspace(workspaceDir: string): Promise<string> {
     }
     return await realpath(workspaceDir);
   } catch (error) {
-    throw new ModelCommandError(
+    throw new Error(
       `Invalid workspace ${workspaceDir}: ${errorMessage(error)}`,
       { cause: error },
     );

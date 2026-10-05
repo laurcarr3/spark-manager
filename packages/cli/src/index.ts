@@ -12,15 +12,15 @@ const HELP = `spark-manager
 Manage local models on an NVIDIA DGX Spark.
 
 Usage:
-  spark-manager start --workspace <path>
-  spark-manager stop --workspace <path>
-  spark-manager status --workspace <path>
+  spark-manager start "<display name>"
+  spark-manager stop "<display name>"
+  spark-manager status "<display name>"
   spark-manager <command>
 
 Commands:
-  start      Run ./start.sh in a model workspace
-  stop       Run ./stop.sh in a model workspace
-  status     Run ./start.sh ps in a model workspace
+  start      Start a registered model
+  stop       Stop a registered model
+  status     Check a registered model's status
   help       Show this help message
   version    Show the current version
 `;
@@ -40,11 +40,11 @@ async function main(args: string[]): Promise<number> {
       console.log("0.0.0");
       return 0;
     case "start":
-      return runWorkspaceCommand("start", commandArgs, startModel, "Start");
+      return runModelCommand("start", commandArgs, startModel, "Start");
     case "stop":
-      return runWorkspaceCommand("stop", commandArgs, stopModel, "Stop");
+      return runModelCommand("stop", commandArgs, stopModel, "Stop");
     case "status": {
-      return runWorkspaceCommand(
+      return runModelCommand(
         "status",
         commandArgs,
         getModelStatus,
@@ -58,19 +58,19 @@ async function main(args: string[]): Promise<number> {
   }
 }
 
-async function runWorkspaceCommand(
+async function runModelCommand(
   command: string,
   args: string[],
-  operation: (options: { workspaceDir: string }) => Promise<CommandResult>,
-  displayName: string,
+  operation: (options: { displayName: string }) => Promise<CommandResult>,
+  commandDisplayName: string,
 ): Promise<number> {
-  const workspaceDir = parseWorkspace(args);
-  if (!workspaceDir) {
-    console.error(`Usage: spark-manager ${command} --workspace <path>`);
+  const modelDisplayName = parseDisplayName(args);
+  if (!modelDisplayName) {
+    console.error(`Usage: spark-manager ${command} "<display name>"`);
     return 1;
   }
 
-  const result = await operation({ workspaceDir });
+  const result = await operation({ displayName: modelDisplayName });
   if (result.stdout) {
     process.stdout.write(result.stdout);
   }
@@ -78,16 +78,16 @@ async function runWorkspaceCommand(
     process.stderr.write(result.stderr);
   }
   if (result.signal) {
-    console.error(`${displayName} command terminated by ${result.signal}.`);
+    console.error(`${commandDisplayName} command terminated by ${result.signal}.`);
   }
   return result.exitCode;
 }
 
-function parseWorkspace(args: string[]): string | undefined {
-  if (args.length !== 2 || args[0] !== "--workspace") {
+function parseDisplayName(args: string[]): string | undefined {
+  if (args.length !== 1) {
     return undefined;
   }
-  return args[1] || undefined;
+  return args[0]?.trim() ? args[0] : undefined;
 }
 
 try {

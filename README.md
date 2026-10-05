@@ -25,19 +25,30 @@ pnpm dev:cli --help
 pnpm dev:api
 ```
 
-## Model workspace
+## Model registry
 
-Pass the path to a checked-out model recipe directly to the CLI. The start,
-stop, and status commands run `./start.sh`, `./stop.sh`, and `./start.sh ps`,
-respectively, in that workspace without invoking a shell.
+Create `~/.spark-manager/registry.json` and manually add each model workspace:
+
+```json
+{
+  "deepseek-v4": {
+    "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark"
+  },
+  "qwen3-next": {
+    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark"
+  }
+}
+```
+
+Each object key is the model name used by the CLI. Model names must be non-empty,
+and each `workspaceDirectory` must exist. The start, stop, and status commands
+run `./start.sh`, `./stop.sh`, and `./start.sh ps`, respectively, in the
+registered workspace without invoking a shell.
 
 ```bash
-pnpm dev:cli start \
-  --workspace /home/calvin/models/DeepSeek-v4-Flash-One-DGX-Spark
-pnpm dev:cli stop \
-  --workspace /home/calvin/models/DeepSeek-v4-Flash-One-DGX-Spark
-pnpm dev:cli status \
-  --workspace /home/calvin/models/DeepSeek-v4-Flash-One-DGX-Spark
+pnpm dev:cli start deepseek-v4
+pnpm dev:cli stop deepseek-v4
+pnpm dev:cli status deepseek-v4
 ```
 
 ## Relevant recipes
