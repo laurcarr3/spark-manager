@@ -25,6 +25,16 @@ pnpm dev:cli --help
 pnpm dev:api
 ```
 
+## Model workspace
+
+Pass the path to a checked-out model recipe directly to the CLI. The status
+command runs `./start.sh ps` in that workspace without invoking a shell.
+
+```bash
+pnpm dev:cli status \
+  --workspace /home/calvin/models/DeepSeek-v4-Flash-One-DGX-Spark
+```
+
 ## Relevant recipes
 
 - [DeepSeek-v4-Flash-One-DGX-Spark](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark/)

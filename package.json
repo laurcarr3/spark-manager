@@ -10,6 +10,7 @@
     "clean": "tsc -b --clean",
     "dev:api": "pnpm --filter @spark-manager/api dev",
     "dev:cli": "pnpm --filter @spark-manager/cli dev",
+    "test": "tsc -b && node --test packages/core/test/*.test.mjs packages/cli/test/*.test.mjs",
     "typecheck": "tsc -b --pretty false"
   },
   "engines": {
