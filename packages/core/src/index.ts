@@ -16,7 +16,7 @@ export interface CommandResult {
   stderr: string;
 }
 
-export interface GetModelStatusOptions {
+export interface ModelCommandOptions {
   workspaceDir: string;
   command?: readonly string[];
 }
@@ -29,16 +29,49 @@ export class ModelCommandError extends Error {
 }
 
 const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
+const DEFAULT_START_COMMAND = ["./start.sh"] as const;
+const DEFAULT_STOP_COMMAND = ["./start.sh", "stop"] as const;
 
 export async function getModelStatus(
-  options: GetModelStatusOptions,
+  options: ModelCommandOptions,
 ): Promise<CommandResult> {
-  const workspaceDir = await resolveWorkspace(options.workspaceDir);
-  const command = options.command ?? DEFAULT_STATUS_COMMAND;
+  return runModelCommand(
+    options.workspaceDir,
+    options.command ?? DEFAULT_STATUS_COMMAND,
+    "Status",
+  );
+}
+
+export async function startModel(
+  options: ModelCommandOptions,
+): Promise<CommandResult> {
+  return runModelCommand(
+    options.workspaceDir,
+    options.command ?? DEFAULT_START_COMMAND,
+    "Start",
+  );
+}
+
+export async function stopModel(
+  options: ModelCommandOptions,
+): Promise<CommandResult> {
+  return runModelCommand(
+    options.workspaceDir,
+    options.command ?? DEFAULT_STOP_COMMAND,
+    "Stop",
+  );
+}
+
+async function runModelCommand(
+  requestedWorkspaceDir: string,
+  command: readonly string[],
+  commandName: string,
+): Promise<CommandResult> {
+  const workspaceDir = await resolveWorkspace(requestedWorkspaceDir);
   const [executable, ...args] = command;
 
   if (!executable) {
-    throw new ModelCommandError("Status command must not be empty.");
+    throw new ModelCommandError(`${commandName} command must not be empty.`);
   }
 
   return new Promise((resolve, reject) => {
@@ -63,7 +96,7 @@ export async function getModelStatus(
     child.once("error", (error) => {
       reject(
         new ModelCommandError(
-          `Unable to run status command in ${workspaceDir}: ${error.message}`,
+          `Unable to run ${commandName.toLowerCase()} command in ${workspaceDir}: ${error.message}`,
           { cause: error },
         ),
       );
