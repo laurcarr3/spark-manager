@@ -27,29 +27,32 @@ pnpm dev:api
 
 ## Model registry
 
-Create `~/.spark-manager/registry.json` and manually add each model workspace:
+Start with the tracked [`registry.example.json`](./registry.example.json), which
+contains entries for the three supported recipes:
 
-```json
-{
-  "deepseek-v4": {
-    "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark"
-  },
-  "qwen3-next": {
-    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark"
-  }
-}
+```bash
+mkdir -p ~/.spark-manager
+cp registry.example.json ~/.spark-manager/registry.json
 ```
 
-Each object key is the model name used by the CLI. Model names must be non-empty,
-and each `workspaceDirectory` must exist. The start, stop, and status commands
-run `./start.sh`, `./stop.sh`, and `./start.sh ps`, respectively, in the
-registered workspace without invoking a shell.
+Edit the copied file so every `workspaceDirectory` points to the corresponding
+local recipe checkout. Each object key is the model name used by the CLI, and
+model names must be non-empty. Each `workspaceDirectory` must exist. The CLI
+runs `./start.sh`, `./stop.sh`, and `./start.sh ps` in the registered workspace
+without invoking a shell.
 
 ```bash
 pnpm dev:cli start deepseek-v4
 pnpm dev:cli stop deepseek-v4
+pnpm dev:cli status
 pnpm dev:cli status deepseek-v4
+pnpm dev:cli list
 ```
+
+Before starting a model, the CLI checks running Docker containers for mounts or
+Compose metadata associated with the other registered workspaces. If another
+registered model is running, it asks for confirmation before stopping that
+model and starting the requested one. Concurrent start attempts are serialized.
 
 ## Relevant recipes
 

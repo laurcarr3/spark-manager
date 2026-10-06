@@ -1,0 +1,11 @@
+{
+  "deepseek-v4": {
+    "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark"
+  },
+  "qwen3.8-27b": {
+    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-27B-SGLang-DGX-Spark"
+  },
+  "qwen3.8-flash-next": {
+    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark"
+  }
+}

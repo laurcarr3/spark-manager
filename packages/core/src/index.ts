@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -22,11 +22,22 @@ export interface ModelCommandOptions {
   displayName: string;
   command?: readonly string[];
   registryPath?: string;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
 }
 
 export interface RegisteredModel {
   displayName: string;
   workspaceDirectory: string;
+}
+
+interface DockerContainerInspection {
+  Config?: {
+    Labels?: Record<string, string> | null;
+  };
+  Mounts?: Array<{
+    Source?: string;
+  }>;
 }
 
 const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
@@ -93,9 +104,11 @@ async function runModelCommand(
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      options.onStdout?.(chunk);
     });
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
+      options.onStderr?.(chunk);
     });
 
     child.once("error", (error) => {
@@ -120,7 +133,7 @@ export async function getRegisteredModel(
     throw new Error("Model display name must not be empty.");
   }
 
-  const registry = await readRegistry(registryPath);
+  const registry = await getRegisteredModels(registryPath);
   const model = registry.find((entry) => entry.displayName === displayName);
   if (!model) {
     throw new Error(
@@ -130,7 +143,9 @@ export async function getRegisteredModel(
   return model;
 }
 
-async function readRegistry(registryPath: string): Promise<RegisteredModel[]> {
+export async function getRegisteredModels(
+  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+): Promise<RegisteredModel[]> {
   let value: unknown;
   try {
     value = JSON.parse(await readFile(registryPath, "utf8"));
@@ -155,6 +170,53 @@ async function readRegistry(registryPath: string): Promise<RegisteredModel[]> {
     }
     return parseRegistryEntry(registryPath, displayName, entry);
   });
+}
+
+export async function getRunningRegisteredModels(
+  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+): Promise<RegisteredModel[]> {
+  const models = await getRegisteredModels(registryPath);
+  const containerIds = (await runDockerCommand(["ps", "--quiet", "--no-trunc"]))
+    .split("\n")
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  if (containerIds.length === 0) {
+    return [];
+  }
+
+  let inspections: unknown;
+  try {
+    inspections = JSON.parse(
+      await runDockerCommand(["inspect", ...containerIds]),
+    );
+  } catch (error) {
+    throw new Error(
+      `Unable to inspect running Docker containers: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (!Array.isArray(inspections)) {
+    throw new Error(
+      "Unable to inspect running Docker containers: expected a JSON array.",
+    );
+  }
+
+  const workspaces = await Promise.all(
+    models.map(async (model) => ({
+      model,
+      workspaceDirectory: await resolveWorkspace(model.workspaceDirectory),
+    })),
+  );
+
+  return workspaces
+    .filter(({ workspaceDirectory }) =>
+      inspections.some((inspection) =>
+        containerBelongsToWorkspace(inspection, workspaceDirectory),
+      ),
+    )
+    .map(({ model }) => model);
 }
 
 function parseRegistryEntry(
@@ -190,6 +252,69 @@ async function resolveWorkspace(workspaceDir: string): Promise<string> {
       { cause: error },
     );
   }
+}
+
+function containerBelongsToWorkspace(
+  value: unknown,
+  workspaceDirectory: string,
+): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const inspection = value as DockerContainerInspection;
+  const composeWorkspace =
+    inspection.Config?.Labels?.["com.docker.compose.project.working_dir"];
+  if (
+    composeWorkspace &&
+    pathIsWithinWorkspace(workspaceDirectory, composeWorkspace)
+  ) {
+    return true;
+  }
+
+  return (
+    inspection.Mounts?.some(
+      (mount) =>
+        typeof mount.Source === "string" &&
+        pathIsWithinWorkspace(workspaceDirectory, mount.Source),
+    ) ?? false
+  );
+}
+
+function pathIsWithinWorkspace(
+  workspaceDirectory: string,
+  candidatePath: string,
+): boolean {
+  const pathFromWorkspace = relative(
+    workspaceDirectory,
+    resolve(candidatePath),
+  );
+  return (
+    pathFromWorkspace === "" ||
+    (!pathFromWorkspace.startsWith("..") && !isAbsolute(pathFromWorkspace))
+  );
+}
+
+function runDockerCommand(args: readonly string[]): Promise<string> {
+  return new Promise((resolveCommand, reject) => {
+    execFile(
+      "docker",
+      args,
+      { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(
+            new Error(
+              `Unable to query Docker: ${stderr.trim() || error.message}`,
+              { cause: error },
+            ),
+          );
+          return;
+        }
+        resolveCommand(stdout);
+      },
+    );
+  });
 }
 
 function errorMessage(error: unknown): string {
