@@ -1,16 +1,12 @@
 #!/usr/bin/env node
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import {
   getModelStatus,
   getRegisteredModel,
   getRegisteredModels,
-  getRunningRegisteredModels,
-  startModel,
+  startRegisteredModel,
   stopModel,
   type CommandResult,
 } from "@spark-manager/core";
@@ -72,57 +68,43 @@ async function runStartCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  await getRegisteredModel(modelDisplayName);
-  const releaseLock = await acquireLifecycleLock();
-  try {
-    const registeredModels = await getRegisteredModels();
-    const otherRegisteredModels = registeredModels.filter(
-      (model) => model.displayName !== modelDisplayName,
-    );
-    if (otherRegisteredModels.length > 0) {
-      const runningModels = (await getRunningRegisteredModels()).filter(
-        (model) => model.displayName !== modelDisplayName,
+  const result = await startRegisteredModel({
+    displayName: modelDisplayName,
+    onStdout: writeStdout,
+    onStderr: writeStderr,
+    confirmSwitch: async (runningModels) => {
+      const runningNames = runningModels
+        .map((model) => JSON.stringify(model.displayName))
+        .join(", ");
+      return promptYesNo(
+        `${runningModels.length === 1 ? "Model" : "Models"} ${runningNames} ${runningModels.length === 1 ? "is" : "are"} running. Stop ${runningModels.length === 1 ? "it" : "them"} and start ${JSON.stringify(modelDisplayName)}? [y/N] `,
       );
-      if (runningModels.length > 0) {
-        const runningNames = runningModels
-          .map((model) => JSON.stringify(model.displayName))
-          .join(", ");
-        const shouldSwitch = await promptYesNo(
-          `${runningModels.length === 1 ? "Model" : "Models"} ${runningNames} ${runningModels.length === 1 ? "is" : "are"} running. Stop ${runningModels.length === 1 ? "it" : "them"} and start ${JSON.stringify(modelDisplayName)}? [y/N] `,
-        );
-        if (!shouldSwitch) {
-          console.error("Start cancelled.");
-          return 1;
-        }
+    },
+    onStopping: (model) => {
+      console.log(`Stopping ${JSON.stringify(model.displayName)}...`);
+    },
+  });
 
-        for (const runningModel of runningModels) {
-          console.log(
-            `Stopping ${JSON.stringify(runningModel.displayName)}...`,
-          );
-          const result = await stopModel({
-            displayName: runningModel.displayName,
-            onStdout: writeStdout,
-            onStderr: writeStderr,
-          });
-          if (result.signal) {
-            console.error(
-              `Stop command for ${JSON.stringify(runningModel.displayName)} terminated by ${result.signal}.`,
-            );
-          }
-          if (result.exitCode !== 0) {
-            console.error(
-              `Unable to start ${JSON.stringify(modelDisplayName)} because ${JSON.stringify(runningModel.displayName)} could not be stopped.`,
-            );
-            return result.exitCode;
-          }
-        }
-      }
-    }
-
-    return runModelCommand("start", args, startModel, "Start");
-  } finally {
-    await releaseLock();
+  if (result.outcome === "cancelled") {
+    console.error("Start cancelled.");
+    return 1;
   }
+  if (result.outcome === "stop-failed") {
+    if (result.result.signal) {
+      console.error(
+        `Stop command for ${JSON.stringify(result.model.displayName)} terminated by ${result.result.signal}.`,
+      );
+    }
+    console.error(
+      `Unable to start ${JSON.stringify(modelDisplayName)} because ${JSON.stringify(result.model.displayName)} could not be stopped.`,
+    );
+    return result.result.exitCode;
+  }
+
+  if (result.result.signal) {
+    console.error(`Start command terminated by ${result.result.signal}.`);
+  }
+  return result.result.exitCode;
 }
 
 async function runStatusCommand(args: string[]): Promise<number> {
@@ -251,77 +233,6 @@ async function promptYesNo(question: string): Promise<boolean> {
       finish(["y", "yes"].includes(answer.trim().toLowerCase()));
     });
   });
-}
-
-async function acquireLifecycleLock(): Promise<() => Promise<void>> {
-  const managerDirectory = join(homedir(), ".spark-manager");
-  const lockDirectory = join(managerDirectory, "lifecycle.lock");
-  await mkdir(managerDirectory, { recursive: true });
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      await mkdir(lockDirectory);
-      try {
-        await writeFile(join(lockDirectory, "pid"), `${process.pid}\n`);
-      } catch (error) {
-        await rm(lockDirectory, { recursive: true, force: true });
-        throw error;
-      }
-      return async () => {
-        await rm(lockDirectory, { recursive: true, force: true });
-      };
-    } catch (error) {
-      if (!isNodeError(error) || error.code !== "EEXIST") {
-        throw error;
-      }
-
-      const ownerPid = await readLockOwner(join(lockDirectory, "pid"));
-      if (ownerPid !== undefined && processIsRunning(ownerPid)) {
-        throw new Error(
-          `Another spark-manager start operation is already running (PID ${ownerPid}).`,
-        );
-      }
-      if (ownerPid === undefined) {
-        throw new Error(
-          `The spark-manager lifecycle lock has no valid owner: ${lockDirectory}`,
-        );
-      }
-
-      const staleLockDirectory = `${lockDirectory}.stale-${process.pid}-${attempt}`;
-      try {
-        await rename(lockDirectory, staleLockDirectory);
-        await rm(staleLockDirectory, { recursive: true, force: true });
-      } catch (renameError) {
-        if (!isNodeError(renameError) || renameError.code !== "ENOENT") {
-          throw renameError;
-        }
-      }
-    }
-  }
-
-  throw new Error("Unable to acquire the spark-manager lifecycle lock.");
-}
-
-async function readLockOwner(path: string): Promise<number | undefined> {
-  try {
-    const ownerPid = Number.parseInt((await readFile(path, "utf8")).trim(), 10);
-    return Number.isSafeInteger(ownerPid) && ownerPid > 0 ? ownerPid : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function processIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !isNodeError(error) || error.code !== "ESRCH";
-  }
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
 }
 
 try {

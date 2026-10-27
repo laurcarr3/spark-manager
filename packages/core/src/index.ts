@@ -1,7 +1,15 @@
 import { execFile, spawn } from "node:child_process";
-import { readFile, realpath, stat } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -31,6 +39,36 @@ export interface RegisteredModel {
   workspaceDirectory: string;
 }
 
+export interface StartRegisteredModelOptions extends ModelCommandOptions {
+  confirmSwitch?: (runningModels: readonly RegisteredModel[]) => Promise<boolean>;
+  onStopping?: (model: RegisteredModel) => void;
+}
+
+export type StartRegisteredModelResult =
+  | {
+      outcome: "started";
+      result: CommandResult;
+      stoppedModels: RegisteredModel[];
+    }
+  | { outcome: "cancelled"; runningModels: RegisteredModel[] }
+  | {
+      outcome: "stop-failed";
+      model: RegisteredModel;
+      result: CommandResult;
+    };
+
+export class UnknownModelError extends Error {
+  constructor(
+    readonly displayName: string,
+    readonly registryPath: string,
+  ) {
+    super(
+      `Unknown display name ${JSON.stringify(displayName)} in ${registryPath}.`,
+    );
+    this.name = "UnknownModelError";
+  }
+}
+
 interface DockerContainerInspection {
   Config?: {
     Labels?: Record<string, string> | null;
@@ -43,6 +81,59 @@ interface DockerContainerInspection {
 const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
 const DEFAULT_START_COMMAND = ["./start.sh"] as const;
 const DEFAULT_STOP_COMMAND = ["./stop.sh"] as const;
+
+export async function startRegisteredModel(
+  options: StartRegisteredModelOptions,
+): Promise<StartRegisteredModelResult> {
+  const registryPath = options.registryPath ?? defaultRegistryPath();
+  await getRegisteredModel(options.displayName, registryPath);
+  const releaseLock = await acquireLifecycleLock(registryPath);
+
+  try {
+    const registeredModels = await getRegisteredModels(registryPath);
+    const hasOtherModels = registeredModels.some(
+      (model) => model.displayName !== options.displayName,
+    );
+    const runningModels = hasOtherModels
+      ? (await getRunningRegisteredModels(registryPath)).filter(
+          (model) => model.displayName !== options.displayName,
+        )
+      : [];
+
+    if (
+      runningModels.length > 0 &&
+      !(await options.confirmSwitch?.(runningModels))
+    ) {
+      return { outcome: "cancelled", runningModels };
+    }
+
+    const stoppedModels: RegisteredModel[] = [];
+    for (const runningModel of runningModels) {
+      options.onStopping?.(runningModel);
+      const result = await stopModel({
+        displayName: runningModel.displayName,
+        registryPath,
+        onStdout: options.onStdout,
+        onStderr: options.onStderr,
+      });
+      if (result.exitCode !== 0 || result.signal) {
+        return { outcome: "stop-failed", model: runningModel, result };
+      }
+      stoppedModels.push(runningModel);
+    }
+
+    const result = await startModel({
+      displayName: options.displayName,
+      command: options.command,
+      registryPath,
+      onStdout: options.onStdout,
+      onStderr: options.onStderr,
+    });
+    return { outcome: "started", result, stoppedModels };
+  } finally {
+    await releaseLock();
+  }
+}
 
 export async function getModelStatus(
   options: ModelCommandOptions,
@@ -127,7 +218,7 @@ async function runModelCommand(
 
 export async function getRegisteredModel(
   displayName: string,
-  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+  registryPath = defaultRegistryPath(),
 ): Promise<RegisteredModel> {
   if (!displayName.trim()) {
     throw new Error("Model display name must not be empty.");
@@ -136,15 +227,13 @@ export async function getRegisteredModel(
   const registry = await getRegisteredModels(registryPath);
   const model = registry.find((entry) => entry.displayName === displayName);
   if (!model) {
-    throw new Error(
-      `Unknown display name ${JSON.stringify(displayName)} in ${registryPath}.`,
-    );
+    throw new UnknownModelError(displayName, registryPath);
   }
   return model;
 }
 
 export async function getRegisteredModels(
-  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+  registryPath = defaultRegistryPath(),
 ): Promise<RegisteredModel[]> {
   let value: unknown;
   try {
@@ -173,7 +262,7 @@ export async function getRegisteredModels(
 }
 
 export async function getRunningRegisteredModels(
-  registryPath = join(homedir(), ".spark-manager", "registry.json"),
+  registryPath = defaultRegistryPath(),
 ): Promise<RegisteredModel[]> {
   const models = await getRegisteredModels(registryPath);
   const containerIds = (await runDockerCommand(["ps", "--quiet", "--no-trunc"]))
@@ -315,6 +404,83 @@ function runDockerCommand(args: readonly string[]): Promise<string> {
       },
     );
   });
+}
+
+function defaultRegistryPath(): string {
+  return join(homedir(), ".spark-manager", "registry.json");
+}
+
+async function acquireLifecycleLock(
+  registryPath: string,
+): Promise<() => Promise<void>> {
+  const managerDirectory = dirname(registryPath);
+  const lockDirectory = join(managerDirectory, "lifecycle.lock");
+  await mkdir(managerDirectory, { recursive: true });
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await mkdir(lockDirectory);
+      try {
+        await writeFile(join(lockDirectory, "pid"), `${process.pid}\n`);
+      } catch (error) {
+        await rm(lockDirectory, { recursive: true, force: true });
+        throw error;
+      }
+      return async () => {
+        await rm(lockDirectory, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") {
+        throw error;
+      }
+
+      const ownerPid = await readLockOwner(join(lockDirectory, "pid"));
+      if (ownerPid !== undefined && processIsRunning(ownerPid)) {
+        throw new Error(
+          `Another spark-manager start operation is already running (PID ${ownerPid}).`,
+        );
+      }
+      if (ownerPid === undefined) {
+        throw new Error(
+          `The spark-manager lifecycle lock has no valid owner: ${lockDirectory}`,
+        );
+      }
+
+      const staleLockDirectory = `${lockDirectory}.stale-${process.pid}-${attempt}`;
+      try {
+        await rename(lockDirectory, staleLockDirectory);
+        await rm(staleLockDirectory, { recursive: true, force: true });
+      } catch (renameError) {
+        if (!isNodeError(renameError) || renameError.code !== "ENOENT") {
+          throw renameError;
+        }
+      }
+    }
+  }
+
+  throw new Error("Unable to acquire the spark-manager lifecycle lock.");
+}
+
+async function readLockOwner(path: string): Promise<number | undefined> {
+  try {
+    const ownerPid = Number.parseInt((await readFile(path, "utf8")).trim(), 10);
+    return Number.isSafeInteger(ownerPid) && ownerPid > 0 ? ownerPid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isNodeError(error) || error.code !== "ESRCH";
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function errorMessage(error: unknown): string {
