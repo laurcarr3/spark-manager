@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spark-manager: repository overview</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1d1f21; --muted: #5c6370; --card: #ffffff;
+    --line: #e2e4e8; --accent: #2f6f4f; --accent-soft: #e5f1ea;
+    --warn: #8a5a00; --warn-soft: #fbf1dc; --code-bg: #f2f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a; --fg: #e4e6ea; --muted: #9aa1ab; --card: #1d2024;
+      --line: #2e3238; --accent: #6fc39a; --accent-soft: #1f3329;
+      --warn: #e8b55a; --warn-soft: #34291a; --code-bg: #24282d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .layout { display: grid; grid-template-columns: 220px 1fr; max-width: 1200px; margin: 0 auto; }
+  nav { position: sticky; top: 0; align-self: start; height: 100vh; overflow: auto;
+    padding: 28px 16px; border-right: 1px solid var(--line); }
+  nav a { display: block; color: var(--muted); text-decoration: none; padding: 4px 8px; border-radius: 6px; font-size: 14px; }
+  nav a:hover { background: var(--accent-soft); color: var(--fg); }
+  nav .brand { font-weight: 700; color: var(--fg); margin-bottom: 12px; }
+  main { padding: 28px 40px 80px; min-width: 0; }
+  h1 { font-size: 30px; margin: 0 0 4px; }
+  h2 { font-size: 22px; margin: 48px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 17px; margin: 24px 0 8px; }
+  p.lead { color: var(--muted); margin-top: 0; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h4 { margin: 0 0 6px; font-size: 15px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+    background: var(--warn-soft); color: var(--warn); vertical-align: middle; margin-left: 4px; }
+  .decision { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+  .decision h4 { margin: 0 0 4px; }
+  .decision .why { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+  .risk { border-left-color: var(--warn); }
+  .diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .diagram text { fill: var(--fg); font: 13px system-ui, sans-serif; }
+  .diagram .sub { fill: var(--muted); font-size: 11px; }
+  .diagram .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  .diagram .core { fill: var(--accent-soft); stroke: var(--accent); }
+  .diagram .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+  ol.steps li { margin-bottom: 6px; }
+  .muted { color: var(--muted); }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } nav { display: none; } main { padding: 20px; } }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div class="brand">spark-manager</div>
+  <a href="#summary">Summary</a>
+  <a href="#layout">Repository layout</a>
+  <a href="#design">System design</a>
+  <a href="#switch">Model switch flow</a>
+  <a href="#cli">CLI usage</a>
+  <a href="#api">HTTP API</a>
+  <a href="#config">Configuration</a>
+  <a href="#decisions">Design decisions</a>
+  <a href="#tests">Tests</a>
+  <a href="#history">History</a>
+  <a href="#risks">Gaps and risks</a>
+</nav>
+<main>
+
+<h1>spark-manager</h1>
+<p class="lead">Local model management for the NVIDIA DGX Spark. TypeScript monorepo with a CLI and an HTTP API.</p>
+<p class="muted">Snapshot date: 2026-10-13. Branch <code>main</code> at <code>4018fd5</code>. Items with the tag <span class="tag">UNCOMMITTED</span> come from changes in the working tree that are not committed.</p>
+
+<h2 id="summary">Summary</h2>
+<p>spark-manager starts, stops, and monitors local LLM serving "recipes" on one DGX Spark. Each recipe is a git checkout. Each recipe has <code>./start.sh</code>, <code>./stop.sh</code>, and <code>./start.sh ps</code>. The recipes run their models in Docker containers.</p>
+<p>spark-manager does not know how a recipe serves its model. It only calls the recipe scripts. It keeps one model on the GPU at a time. The author made it to use with a fork of sparkDash.</p>
+<div class="cards">
+  <div class="card"><h4>Runtime</h4><p>Node.js 20 or later, ES modules, TypeScript 7</p></div>
+  <div class="card"><h4>Packages</h4><p>pnpm 12 workspaces: core, cli, api</p></div>
+  <div class="card"><h4>API framework</h4><p>Express 5, loopback only</p></div>
+  <div class="card"><h4>Tests</h4><p><code>node:test</code> on compiled output, 24 tests</p></div>
+</div>
+<h3>Supported recipes</h3>
+<ul>
+  <li><a href="https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark/">DeepSeek-v4-Flash-One-DGX-Spark</a></li>
+  <li>Qwen3.8-27B-SGLang-DGX-Spark</li>
+  <li>Qwen3.8-Flash-Next-Single-DGX-Spark</li>
+</ul>
+
+<h2 id="layout">Repository layout</h2>
+<pre><code>spark-manager/
+├── package.json             root scripts, pnpm@12.4.2, node &gt;=20
+├── pnpm-workspace.yaml      packages/*
+├── tsconfig.json            solution file (references core, cli, api)
+├── tsconfig.base.json       strict, NodeNext, ES2022, noUncheckedIndexedAccess
+├── registry.example.json    three example models
+├── .env.example             API port and token          <span class="tag">UNCOMMITTED</span>
+└── packages/
+    ├── core/   src/index.ts  all model logic, Node built-ins only
+    │           test/status.test.mjs
+    ├── cli/    src/index.ts  bin "spark-manager"
+    │           test/workspace-commands.test.mjs
+    └── api/    src/index.ts  listen on 127.0.0.1
+                src/app.ts    createApp() factory          <span class="tag">UNCOMMITTED</span>
+                test/api.test.mjs                          <span class="tag">UNCOMMITTED</span></code></pre>
+
+<table>
+  <tr><th>Package</th><th>Role</th><th>Depends on</th></tr>
+  <tr><td><code>@spark-manager/core</code></td><td>Types, registry, script runner, Docker detection, lifecycle lock, model switch logic</td><td>Node built-ins only</td></tr>
+  <tr><td><code>@spark-manager/cli</code></td><td>Argument parsing, terminal output, interactive confirmation</td><td>core</td></tr>
+  <tr><td><code>@spark-manager/api</code></td><td>HTTP routes, validation, error envelope, bearer token</td><td>core, express ^5.2.1</td></tr>
+</table>
+
+<h3>Root scripts</h3>
+<table>
+  <tr><th>Script</th><th>Command</th></tr>
+  <tr><td><code>pnpm build</code></td><td><code>tsc -b</code></td></tr>
+  <tr><td><code>pnpm typecheck</code></td><td><code>tsc -b --pretty false</code></td></tr>
+  <tr><td><code>pnpm test</code></td><td><code>tsc -b</code>, then <code>node --test</code> on core, cli and api tests</td></tr>
+  <tr><td><code>pnpm dev:cli</code></td><td>Runs the CLI with <code>tsx</code></td></tr>
+  <tr><td><code>pnpm dev:api</code></td><td>Runs the API with <code>tsx watch</code></td></tr>
+  <tr><td><code>pnpm clean</code></td><td><code>tsc -b --clean</code></td></tr>
+</table>
+<p class="muted">The repository has no linter, no formatter, and no CI configuration.</p>
+
+<h2 id="design">System design</h2>
+<div class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="Architecture diagram">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="fill: var(--muted)"/>
+    </marker>
+  </defs>
+  <!-- front ends -->
+  <rect class="box" x="60" y="20" width="250" height="64" rx="8"/>
+  <text x="185" y="46" text-anchor="middle">CLI: spark-manager</text>
+  <text class="sub" x="185" y="66" text-anchor="middle">y/N prompt, streams output</text>
+  <rect class="box" x="450" y="20" width="250" height="64" rx="8"/>
+  <text x="575" y="46" text-anchor="middle">HTTP API (Express 5)</text>
+  <text class="sub" x="575" y="66" text-anchor="middle">127.0.0.1, switchRunning flag</text>
+  <text class="sub" x="575" y="12" text-anchor="middle">sparkDash fork, curl</text>
+
+  <path class="edge" d="M185,84 L300,140"/>
+  <path class="edge" d="M575,84 L460,140"/>
+
+  <!-- core -->
+  <rect class="box core" x="160" y="142" width="440" height="110" rx="10"/>
+  <text x="380" y="166" text-anchor="middle" style="font-weight:700">@spark-manager/core</text>
+  <text class="sub" x="380" y="188" text-anchor="middle">startRegisteredModel · startModel · stopModel · getModelStatus</text>
+  <text class="sub" x="380" y="206" text-anchor="middle">getRegisteredModels · getRunningRegisteredModels</text>
+  <text class="sub" x="380" y="224" text-anchor="middle">acquireLifecycleLock · runModelCommand (spawn, shell: false)</text>
+  <text class="sub" x="380" y="242" text-anchor="middle">UnknownModelError · StartRegisteredModelResult</text>
+
+  <path class="edge" d="M210,252 L110,320"/>
+  <path class="edge" d="M330,252 L300,320"/>
+  <path class="edge" d="M450,252 L480,320"/>
+  <path class="edge" d="M560,252 L660,320"/>
+
+  <!-- resources -->
+  <rect class="box" x="20" y="322" width="170" height="72" rx="8"/>
+  <text x="105" y="348" text-anchor="middle">registry.json</text>
+  <text class="sub" x="105" y="366" text-anchor="middle">~/.spark-manager/</text>
+  <text class="sub" x="105" y="382" text-anchor="middle">name → workspaceDirectory</text>
+
+  <rect class="box" x="210" y="322" width="170" height="72" rx="8"/>
+  <text x="295" y="348" text-anchor="middle">lifecycle.lock/</text>
+  <text class="sub" x="295" y="366" text-anchor="middle">mkdir lock + pid file</text>
+  <text class="sub" x="295" y="382" text-anchor="middle">next to registry.json</text>
+
+  <rect class="box" x="400" y="322" width="170" height="72" rx="8"/>
+  <text x="485" y="348" text-anchor="middle">Recipe workspaces</text>
+  <text class="sub" x="485" y="366" text-anchor="middle">./start.sh · ./stop.sh</text>
+  <text class="sub" x="485" y="382" text-anchor="middle">./start.sh ps</text>
+
+  <rect class="box" x="590" y="322" width="150" height="72" rx="8"/>
+  <text x="665" y="348" text-anchor="middle">Docker</text>
+  <text class="sub" x="665" y="366" text-anchor="middle">docker ps / inspect</text>
+  <text class="sub" x="665" y="382" text-anchor="middle">find running models</text>
+</svg>
+</div>
+
+<h3>Core concepts</h3>
+<table>
+  <tr><th>Concept</th><th>Description</th></tr>
+  <tr><td>Registered model</td><td><code>{ displayName, workspaceDirectory }</code>. The display name is the key in <code>registry.json</code>. Lookup is exact and case-sensitive.</td></tr>
+  <tr><td>Workspace</td><td>A recipe checkout. Core checks that it is a directory and resolves it with <code>realpath</code>.</td></tr>
+  <tr><td>Model command</td><td>A recipe script. Core runs it as a child process with <code>cwd</code> set to the workspace. Default commands: status <code>./start.sh ps</code>, start <code>./start.sh</code>, stop <code>./stop.sh</code>.</td></tr>
+  <tr><td>CommandResult</td><td><code>{ exitCode, signal, stdout, stderr }</code>. Script failures are returned as data. They are not thrown.</td></tr>
+  <tr><td>Running model</td><td>Detected live from Docker. A container belongs to a workspace if its Compose label <code>com.docker.compose.project.working_dir</code> or one of its mount sources is in the workspace. No "running" state is stored.</td></tr>
+  <tr><td>Lifecycle lock</td><td>Directory <code>lifecycle.lock</code> next to the registry. <code>mkdir</code> is atomic. A <code>pid</code> file lets core remove a stale lock. Core tries up to 4 times.</td></tr>
+</table>
+
+<h2 id="switch">Model switch flow</h2>
+<p><code>startRegisteredModel</code> (<code>packages/core/src/index.ts:85</code>) <span class="tag">UNCOMMITTED</span> holds the single-model rule. The CLI and the API both call it.</p>
+<ol class="steps">
+  <li>Make sure that the display name is in the registry. If not, throw <code>UnknownModelError</code>.</li>
+  <li>Get the lifecycle lock. If a live process holds it, throw an error. Do not wait.</li>
+  <li>If the registry has other models, ask Docker which registered models are running. Remove the requested model from that list.</li>
+  <li>If other models are running, call <code>confirmSwitch(runningModels)</code>. If the callback is missing or returns <code>false</code>, return <code>{ outcome: "cancelled" }</code>.</li>
+  <li>Stop each running model in sequence. Call <code>onStopping</code> first. If a stop script fails, return <code>{ outcome: "stop-failed" }</code>.</li>
+  <li>Run the start script. Return <code>{ outcome: "started", result, stoppedModels }</code>.</li>
+  <li>Release the lock in <code>finally</code>.</li>
+</ol>
+<table>
+  <tr><th>Outcome</th><th>CLI result</th><th>API result</th></tr>
+  <tr><td><code>cancelled</code></td><td><code>Start cancelled.</code>, exit 1</td><td>409 <code>MODEL_ALREADY_RUNNING</code> with <code>runningModels</code></td></tr>
+  <tr><td><code>stop-failed</code></td><td><code>Unable to start "Y" because "X" could not be stopped.</code>, exit code of the stop script</td><td>502 <code>COMMAND_FAILED</code> with <code>command</code></td></tr>
+  <tr><td><code>started</code>, script failed</td><td>Exit code of the start script</td><td>502 <code>COMMAND_FAILED</code></td></tr>
+  <tr><td><code>started</code>, script passed</td><td>Exit 0</td><td>200 with <code>stoppedModels</code> and <code>command</code></td></tr>
+</table>
+
+<h2 id="cli">CLI usage</h2>
+<pre><code>pnpm dev:cli list                       # name&lt;TAB&gt;workspace, one per line
+pnpm dev:cli status                     # "start.sh ps" output for all models
+pnpm dev:cli status deepseek-v4         # status for one model
+pnpm dev:cli start deepseek-v4          # may ask to stop other models
+pnpm dev:cli stop deepseek-v4           # runs ./stop.sh
+pnpm dev:cli --help
+pnpm dev:cli --version                  # prints 0.0.0</code></pre>
+<table>
+  <tr><th>Command</th><th>Arguments</th><th>Behavior</th></tr>
+  <tr><td><code>start</code></td><td>One display name</td><td>Calls <code>startRegisteredModel</code>. Streams script output. Shows a prompt if other models are running. Only <code>y</code> or <code>yes</code> means yes. End of input means no.</td></tr>
+  <tr><td><code>stop</code></td><td>One display name</td><td>Runs <code>./stop.sh</code>. No lock and no prompt. Returns the script exit code.</td></tr>
+  <tr><td><code>status</code></td><td>Zero or one display name</td><td>Prints <code>&lt;name&gt;:</code> and the status output. An error for one model does not stop the loop. Returns the first non-zero exit code.</td></tr>
+  <tr><td><code>list</code></td><td>None</td><td>Prints the registry.</td></tr>
+  <tr><td><code>help</code>, <code>version</code></td><td>None</td><td>Prints help or <code>0.0.0</code>.</td></tr>
+</table>
+<p>Example prompt:</p>
+<pre><code>Model "qwen3.8-27b" is running. Stop it and start "deepseek-v4"? [y/N] y
+Stopping "qwen3.8-27b"...</code></pre>
+
+<h2 id="api">HTTP API <span class="tag">UNCOMMITTED</span></h2>
+<p><code>createApp({ registryPath?, token? })</code> in <code>packages/api/src/app.ts</code> builds the Express app. <code>packages/api/src/index.ts</code> reads the environment and listens on <code>127.0.0.1</code> only.</p>
+<table>
+  <tr><th>Method and path</th><th>Behavior</th></tr>
+  <tr><td><code>GET /health</code></td><td><code>{ service: "spark-manager", status: "ok" }</code></td></tr>
+  <tr><td><code>GET /models</code></td><td><code>{ models: [{ displayName, workspaceDirectory }] }</code></td></tr>
+  <tr><td><code>GET /models/status</code></td><td>Status for each model. An error for one model goes in that model's <code>error</code> field. The request does not fail.</td></tr>
+  <tr><td><code>GET /models/:displayName/status</code></td><td>Status for one model. Unknown name: 404 <code>MODEL_NOT_FOUND</code>.</td></tr>
+  <tr><td><code>POST /models/:displayName/start</code></td><td>Body: <code>{ "switchRunning"?: boolean }</code>. No other fields are permitted. See the outcome table above.</td></tr>
+  <tr><td><code>POST /models/:displayName/stop</code></td><td>Runs the stop script. Script failure: 502.</td></tr>
+</table>
+<h3>Examples</h3>
+<pre><code>curl http://127.0.0.1:3000/models
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{}' http://127.0.0.1:3000/models/deepseek-v4/start
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"switchRunning":true}' http://127.0.0.1:3000/models/deepseek-v4/start
+curl -H "Authorization: Bearer $SPARK_MANAGER_API_TOKEN" http://127.0.0.1:3000/health</code></pre>
+<h3>Error envelope</h3>
+<pre><code>{ "error": { "code": "MODEL_ALREADY_RUNNING", "message": "...", "runningModels": [ ... ] } }</code></pre>
+<table>
+  <tr><th>Status</th><th>Code</th><th>Cause</th></tr>
+  <tr><td>400</td><td><code>INVALID_REQUEST</code>, <code>INVALID_JSON</code></td><td>Bad body, unknown field, <code>switchRunning</code> is not a boolean, bad JSON</td></tr>
+  <tr><td>401</td><td><code>UNAUTHORIZED</code></td><td>Token is set and the bearer token is missing or wrong</td></tr>
+  <tr><td>404</td><td><code>MODEL_NOT_FOUND</code>, <code>NOT_FOUND</code></td><td>Unknown model or route</td></tr>
+  <tr><td>409</td><td><code>MODEL_ALREADY_RUNNING</code></td><td>Other models run and <code>switchRunning</code> is not <code>true</code></td></tr>
+  <tr><td>413</td><td><code>BODY_TOO_LARGE</code></td><td>Body is larger than 8 KB</td></tr>
+  <tr><td>415</td><td><code>JSON_REQUIRED</code></td><td>POST without <code>Content-Type: application/json</code></td></tr>
+  <tr><td>500</td><td><code>INTERNAL_ERROR</code></td><td>Other errors, including a held lifecycle lock</td></tr>
+  <tr><td>502</td><td><code>COMMAND_FAILED</code></td><td>A recipe script failed</td></tr>
+</table>
+
+<h2 id="config">Configuration</h2>
+<h3>Model registry</h3>
+<p>Copy <code>registry.example.json</code> to <code>~/.spark-manager/registry.json</code>. Change each <code>workspaceDirectory</code> to your recipe checkout.</p>
+<pre><code>{
+  "deepseek-v4":        { "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark" },
+  "qwen3.8-27b":        { "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-27B-SGLang-DGX-Spark" },
+  "qwen3.8-flash-next": { "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark" }
+}</code></pre>
+<h3>Environment variables <span class="tag">UNCOMMITTED</span></h3>
+<table>
+  <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+  <tr><td><code>SPARK_MANAGER_API_PORT</code></td><td><code>3000</code></td><td>API port</td></tr>
+  <tr><td><code>SPARK_MANAGER_API_TOKEN</code></td><td>empty</td><td>If set, all routes need <code>Authorization: Bearer &lt;token&gt;</code></td></tr>
+</table>
+<p>The app does not load <code>.env</code>. Run <code>set -a &amp;&amp; source .env &amp;&amp; set +a</code> before you start the API.</p>
+
+<h2 id="decisions">Design decisions</h2>
+
+<div class="decision"><h4>1. Display names in a registry, not workspace paths</h4>
+<p>Commit <code>5397c55</code>. Users type short, stable names. The paths stay in one file. The registry also defines which models the single-model rule checks.</p>
+<p class="why">Evidence: <code>packages/core/src/index.ts:219-262</code>.</p></div>
+
+<div class="decision"><h4>2. Recipe scripts are the contract</h4>
+<p>spark-manager only calls <code>start.sh</code>, <code>stop.sh</code>, and <code>start.sh ps</code>. It does not know if a recipe uses SGLang, vLLM, or another server. You can add a new recipe without code changes.</p>
+<p class="why">Evidence: default commands at <code>packages/core/src/index.ts:81-83</code>.</p></div>
+
+<div class="decision"><h4>3. No shell</h4>
+<p>Core uses <code>spawn(..., { shell: false })</code> and <code>execFile("docker", ...)</code>. Names and paths cannot inject shell commands.</p>
+<p class="why">Evidence: <code>packages/core/src/index.ts:185-190</code>, <code>:389</code>; README "without invoking a shell".</p></div>
+
+<div class="decision"><h4>4. Get the running state from Docker, do not store it</h4>
+<p>Core asks Docker each time. A stored "running" flag cannot go out of date. Core matches containers by the Compose working-directory label or by bind mounts in the workspace.</p>
+<p class="why">Evidence: <code>packages/core/src/index.ts:264-385</code>.</p></div>
+
+<div class="decision"><h4>5. One model at a time, with confirmation</h4>
+<p>The DGX Spark has one GPU with unified memory. Two large models compete for that memory. The switch decision is a callback, so each front end sets its policy: the CLI asks the user, and the API needs <code>switchRunning: true</code>. With no callback, core does not switch.</p>
+<p class="why">Evidence: commit <code>0ea543d</code>; <code>packages/core/src/index.ts:103-108</code>.</p></div>
+
+<div class="decision"><h4>6. Directory lock serializes start operations</h4>
+<p><code>mkdir</code> is atomic on the local file system. The <code>pid</code> file lets a new process find and remove a stale lock. A second start fails at once. It does not wait.</p>
+<p class="why">Evidence: <code>packages/core/src/index.ts:413-462</code>.</p></div>
+
+<div class="decision"><h4>7. Shared logic in core, thin front ends <span class="tag">UNCOMMITTED</span></h4>
+<p>The current refactor moves the switch and lock logic from the CLI into core. The CLI and the API now give the same behavior. Core does not write to the console. It sends output through <code>onStdout</code>, <code>onStderr</code>, and <code>onStopping</code> callbacks.</p></div>
+
+<div class="decision"><h4>8. Expected outcomes are data, faults are exceptions</h4>
+<p>Script failures return a <code>CommandResult</code>. Switch results return a discriminated union. Only real faults throw. <code>UnknownModelError</code> is typed, so the API can map it to 404.</p>
+<p class="why">Evidence: <code>packages/core/src/index.ts:47-70</code>.</p></div>
+
+<div class="decision"><h4>9. Dependency injection for tests</h4>
+<p>All core functions accept an optional <code>registryPath</code> and <code>command</code>. The API exports a <code>createApp</code> factory. Tests put a fake <code>docker</code> script on <code>PATH</code>.</p></div>
+
+<div class="decision"><h4>10. Hardened local API</h4>
+<p>The API listens on loopback only. POST routes need a JSON content type, so a cross-origin HTML form cannot start or stop a model. The body limit is 8 KB. Body fields are on an allowlist. The bearer token check uses <code>timingSafeEqual</code>. <code>x-powered-by</code> is off.</p>
+<p class="why">Evidence: <code>packages/api/src/app.ts:27-29</code>, <code>:233-273</code>; README lines 76-79.</p></div>
+
+<h2 id="tests">Tests</h2>
+<p>Run <code>pnpm test</code>. The tests import from <code>dist/</code>, so the script builds first. The tests use temporary directories, fake recipe scripts, and a fake <code>docker</code> binary.</p>
+<table>
+  <tr><th>File</th><th>Tests</th><th>Coverage</th></tr>
+  <tr><td><code>packages/core/test/status.test.mjs</code></td><td>4</td><td>Status runs in the workspace. Bad workspace, unknown name, and empty <code>workspaceDirectory</code> are rejected.</td></tr>
+  <tr><td><code>packages/cli/test/workspace-commands.test.mjs</code></td><td>15</td><td>Start, stop, status, list. Exit codes and stderr. Output streaming. Switch prompt with yes and no. Detection by mount and by Compose label. Argument errors.</td></tr>
+  <tr><td><code>packages/api/test/api.test.mjs</code> <span class="tag">UNCOMMITTED</span></td><td>5</td><td>List and status. Start and stop. 415 and 400 errors. 409 then switch. Bearer token.</td></tr>
+</table>
+<p class="muted">No tests yet for: the lock (contention and stale lock), <code>stop-failed</code>, 502 responses, 413 and bad JSON, <code>/health</code>, help and version, and Docker failure.</p>
+
+<h2 id="history">History</h2>
+<table>
+  <tr><th>Commit</th><th>Date</th><th>Message</th></tr>
+  <tr><td><code>4018fd5</code></td><td>2026-10-06</td><td>added local skills <span class="muted">(only <code>.gitignore</code> changes; skills are local)</span></td></tr>
+  <tr><td><code>0ea543d</code></td><td>2026-10-06</td><td>added handling for ensuring that only one model is running at a time</td></tr>
+  <tr><td><code>5397c55</code></td><td>2026-10-05</td><td>added model registry and updated CLI to specify model display name instead of workspace</td></tr>
+  <tr><td><code>ebed40f</code></td><td>2026-10-05</td><td>cleaned up tests <span class="muted">(<code>origin/main</code>)</span></td></tr>
+  <tr><td><code>d1b9ab5</code></td><td>2026-10-05</td><td>fixed stop cli command</td></tr>
+  <tr><td><code>a8cd8cc</code></td><td>2026-10-05</td><td>added start and stop commands for cli</td></tr>
+  <tr><td><code>6e088b8</code></td><td>2026-10-05</td><td>added status functionality to cli</td></tr>
+  <tr><td><code>4ca21c2</code></td><td>2026-09-16</td><td>initial setup</td></tr>
+</table>
+<p>Local <code>main</code> is 3 commits ahead of <code>origin/main</code>. The core refactor and the HTTP API are not committed.</p>
+<p>Local agent skills (from <code>mattpocock/skills</code>) are in <code>.agents/skills/</code>, with links in <code>.claude/skills/</code>. Git ignores both. The repository has no CLAUDE.md, glossary, or ADRs.</p>
+
+<h2 id="risks">Gaps and risks</h2>
+<div class="decision risk"><h4>README API examples use the wrong name case</h4>
+<p>The curl examples use <code>DeepSeek-v4</code>. The registry key is <code>deepseek-v4</code>, and lookup is case-sensitive. These examples return 404.</p></div>
+<div class="decision risk"><h4>Stop does not take the lock</h4>
+<p>A stop can run at the same time as a start or a switch.</p></div>
+<div class="decision risk"><h4>A held lock gives HTTP 500</h4>
+<p>The lock error is a plain <code>Error</code>. The API returns 500 <code>INTERNAL_ERROR</code>. A 409 or 423 status is more correct.</p></div>
+<div class="decision risk"><h4>API start waits for the full script</h4>
+<p>The request has no timeout and no streaming. If a recipe runs <code>start.sh</code> in the foreground, the request does not end.</p></div>
+<div class="decision risk"><h4>One bad entry or a Docker fault blocks all starts</h4>
+<p>Detection resolves every workspace and calls Docker. If more than one model is registered, a fault in either step stops every start.</p></div>
+<div class="decision risk"><h4>Detection blind spots</h4>
+<p>Core does not find a container that has no Compose label and no mount in the workspace (for example, only a shared model cache). If the requested model already runs, core runs <code>start.sh</code> again.</p></div>
+<div class="decision risk"><h4>Small items</h4>
+<ul>
+  <li><code>Model</code> and <code>ModelStatus</code> types are not used.</li>
+  <li>An empty display-name key gives an incorrect error message about <code>workspaceDirectory</code>.</li>
+  <li>The API does not validate the port. <code>Number()</code> can return <code>NaN</code>.</li>
+  <li>The API does not check the <code>Host</code> header. Without a token, DNS rebinding can reach the API.</li>
+  <li>The CLI version is fixed at <code>0.0.0</code>.</li>
+  <li><code>registry.example.json</code> has absolute paths for one user.</li>
+  <li>No linter, formatter, or CI.</li>
+</ul></div>
+
+</main>
+</div>
+</body>
+</html>

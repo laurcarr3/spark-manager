@@ -1,15 +1,7 @@
-import express from "express";
+import { createApp } from "./app.js";
 
-const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-const app = express();
-
-app.get("/health", (_request, response) => {
-  response.json({ service: "spark-manager", status: "ok" });
-});
-
-app.use((_request, response) => {
-  response.status(404).json({ error: "Not found" });
-});
+const port = Number(process.env.SPARK_MANAGER_API_PORT ?? 3000);
+const app = createApp({ token: process.env.SPARK_MANAGER_API_TOKEN });
 
 app.listen(port, "127.0.0.1", () => {
   console.log(`spark-manager API listening on http://127.0.0.1:${port}`);

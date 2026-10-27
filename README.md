@@ -54,6 +54,48 @@ Compose metadata associated with the other registered workspaces. If another
 registered model is running, it asks for confirmation before stopping that
 model and starting the requested one. Concurrent start attempts are serialized.
 
+## HTTP API
+
+The API exposes the same list, status, start, stop, and model-switch behavior as
+the CLI. It listens only on `127.0.0.1` and uses port `3000` by default.
+
+```bash
+pnpm dev:api
+
+curl http://127.0.0.1:3000/models
+curl http://127.0.0.1:3000/models/status
+curl http://127.0.0.1:3000/models/DeepSeek-v4/status
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{}' http://127.0.0.1:3000/models/DeepSeek-v4/start
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"switchRunning":true}' http://127.0.0.1:3000/models/DeepSeek-v4/start
+curl -X POST -H 'Content-Type: application/json' \
+  http://127.0.0.1:3000/models/DeepSeek-v4/stop
+```
+
+Model names in URLs must be URL-encoded. A start request returns `409` when
+another registered model is running unless `switchRunning` is `true`. Mutation
+requests require a JSON content type, which also prevents ordinary cross-origin
+HTML forms from triggering local lifecycle operations.
+
+Set `SPARK_MANAGER_API_PORT` to choose another port. For an additional local
+authentication layer, set `SPARK_MANAGER_API_TOKEN`; all requests must then send
+`Authorization: Bearer <token>`.
+
+```bash
+cp .env.example .env
+# Edit .env as needed, then export its values into the current shell.
+set -a && source .env && set +a
+pnpm dev:api
+```
+
+If a token is configured, include it in requests:
+
+```bash
+curl -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  http://127.0.0.1:3000/models
+```
+
 ## Relevant recipes
 
 - [DeepSeek-v4-Flash-One-DGX-Spark](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark/)
