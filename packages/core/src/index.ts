@@ -34,12 +34,33 @@ export interface ModelCommandOptions {
   onStderr?: (chunk: string) => void;
 }
 
+export interface StartModelOptions extends ModelCommandOptions {
+  environment?: Readonly<Record<string, string>>;
+}
+
+export interface LaunchOptionChoice {
+  id: string;
+  label: string;
+  description?: string;
+  environment: Readonly<Record<string, string>>;
+}
+
+export interface LaunchOption {
+  id: string;
+  label: string;
+  description?: string;
+  defaultChoice?: string;
+  choices: readonly LaunchOptionChoice[];
+}
+
 export interface RegisteredModel {
   displayName: string;
   workspaceDirectory: string;
+  launchOptions?: readonly LaunchOption[];
 }
 
 export interface StartRegisteredModelOptions extends ModelCommandOptions {
+  launchOptionSelections?: Readonly<Record<string, string>>;
   confirmSwitch?: (runningModels: readonly RegisteredModel[]) => Promise<boolean>;
   onStopping?: (model: RegisteredModel) => void;
 }
@@ -86,7 +107,11 @@ export async function startRegisteredModel(
   options: StartRegisteredModelOptions,
 ): Promise<StartRegisteredModelResult> {
   const registryPath = options.registryPath ?? defaultRegistryPath();
-  await getRegisteredModel(options.displayName, registryPath);
+  const model = await getRegisteredModel(options.displayName, registryPath);
+  const launchEnvironment = resolveLaunchEnvironment(
+    model,
+    options.launchOptionSelections,
+  );
   const releaseLock = await acquireLifecycleLock(registryPath);
 
   try {
@@ -125,6 +150,7 @@ export async function startRegisteredModel(
     const result = await startModel({
       displayName: options.displayName,
       command: options.command,
+      environment: launchEnvironment,
       registryPath,
       onStdout: options.onStdout,
       onStderr: options.onStderr,
@@ -146,12 +172,13 @@ export async function getModelStatus(
 }
 
 export async function startModel(
-  options: ModelCommandOptions,
+  options: StartModelOptions,
 ): Promise<CommandResult> {
   return runModelCommand(
     options,
     options.command ?? DEFAULT_START_COMMAND,
     "Start",
+    options.environment,
   );
 }
 
@@ -169,6 +196,7 @@ async function runModelCommand(
   options: ModelCommandOptions,
   command: readonly string[],
   commandName: string,
+  environment?: Readonly<Record<string, string>>,
 ): Promise<CommandResult> {
   const model = await getRegisteredModel(
     options.displayName,
@@ -184,7 +212,7 @@ async function runModelCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: workspaceDir,
-      env: process.env,
+      env: { ...process.env, ...environment },
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -325,7 +353,318 @@ function parseRegistryEntry(
     );
   }
 
-  return { displayName, workspaceDirectory: entry.workspaceDirectory };
+  const launchOptions =
+    "launchOptions" in entry
+      ? parseLaunchOptions(registryPath, displayName, entry.launchOptions)
+      : undefined;
+
+  return {
+    displayName,
+    workspaceDirectory: entry.workspaceDirectory,
+    ...(launchOptions ? { launchOptions } : {}),
+  };
+}
+
+export function resolveLaunchEnvironment(
+  model: RegisteredModel,
+  selections: Readonly<Record<string, string>> = {},
+): Record<string, string> {
+  const options = model.launchOptions ?? [];
+  const knownOptionIds = new Set(options.map((option) => option.id));
+  const unknownOptionId = Object.keys(selections).find(
+    (optionId) => !knownOptionIds.has(optionId),
+  );
+  if (unknownOptionId) {
+    throw new Error(
+      `Unknown launch option ${JSON.stringify(unknownOptionId)} for ${JSON.stringify(model.displayName)}.`,
+    );
+  }
+
+  const environment: Record<string, string> = {};
+  for (const option of options) {
+    const choiceId = selections[option.id] ?? option.defaultChoice;
+    if (choiceId === undefined) {
+      throw new Error(
+        `Launch option ${JSON.stringify(option.id)} for ${JSON.stringify(model.displayName)} requires a selection.`,
+      );
+    }
+    const choice = option.choices.find((candidate) => candidate.id === choiceId);
+    if (!choice) {
+      throw new Error(
+        `Unknown choice ${JSON.stringify(choiceId)} for launch option ${JSON.stringify(option.id)} on ${JSON.stringify(model.displayName)}.`,
+      );
+    }
+
+    for (const [name, value] of Object.entries(choice.environment)) {
+      const existingValue = environment[name];
+      if (existingValue !== undefined && existingValue !== value) {
+        throw new Error(
+          `Launch options for ${JSON.stringify(model.displayName)} assign conflicting values to ${name}.`,
+        );
+      }
+      environment[name] = value;
+    }
+  }
+  return environment;
+}
+
+function parseLaunchOptions(
+  registryPath: string,
+  displayName: string,
+  value: unknown,
+): LaunchOption[] {
+  if (!Array.isArray(value)) {
+    throw invalidLaunchOptions(
+      registryPath,
+      displayName,
+      "launchOptions must be an array",
+    );
+  }
+
+  const optionIds = new Set<string>();
+  return value.map((entry, optionIndex) => {
+    const location = `launchOptions[${optionIndex}]`;
+    const option = requireRecord(
+      registryPath,
+      displayName,
+      location,
+      entry,
+    );
+    const id = requireIdentifier(
+      registryPath,
+      displayName,
+      `${location}.id`,
+      option.id,
+    );
+    if (optionIds.has(id)) {
+      throw invalidLaunchOptions(
+        registryPath,
+        displayName,
+        `${location}.id duplicates ${JSON.stringify(id)}`,
+      );
+    }
+    optionIds.add(id);
+
+    const label = requireNonEmptyString(
+      registryPath,
+      displayName,
+      `${location}.label`,
+      option.label,
+    );
+    const description = optionalNonEmptyString(
+      registryPath,
+      displayName,
+      `${location}.description`,
+      option.description,
+    );
+    if (!Array.isArray(option.choices) || option.choices.length === 0) {
+      throw invalidLaunchOptions(
+        registryPath,
+        displayName,
+        `${location}.choices must be a non-empty array`,
+      );
+    }
+
+    const choiceIds = new Set<string>();
+    const choices = option.choices.map((choiceEntry, choiceIndex) => {
+      const choiceLocation = `${location}.choices[${choiceIndex}]`;
+      const choice = requireRecord(
+        registryPath,
+        displayName,
+        choiceLocation,
+        choiceEntry,
+      );
+      const choiceId = requireIdentifier(
+        registryPath,
+        displayName,
+        `${choiceLocation}.id`,
+        choice.id,
+      );
+      if (choiceIds.has(choiceId)) {
+        throw invalidLaunchOptions(
+          registryPath,
+          displayName,
+          `${choiceLocation}.id duplicates ${JSON.stringify(choiceId)}`,
+        );
+      }
+      choiceIds.add(choiceId);
+
+      const environment = parseEnvironment(
+        registryPath,
+        displayName,
+        `${choiceLocation}.environment`,
+        choice.environment,
+      );
+      return {
+        id: choiceId,
+        label: requireNonEmptyString(
+          registryPath,
+          displayName,
+          `${choiceLocation}.label`,
+          choice.label,
+        ),
+        ...optionalProperty(
+          "description",
+          optionalNonEmptyString(
+            registryPath,
+            displayName,
+            `${choiceLocation}.description`,
+            choice.description,
+          ),
+        ),
+        environment,
+      };
+    });
+
+    const defaultChoice = optionalNonEmptyString(
+      registryPath,
+      displayName,
+      `${location}.defaultChoice`,
+      option.defaultChoice,
+    );
+    if (defaultChoice !== undefined && !choiceIds.has(defaultChoice)) {
+      throw invalidLaunchOptions(
+        registryPath,
+        displayName,
+        `${location}.defaultChoice must match a choice id`,
+      );
+    }
+
+    return {
+      id,
+      label,
+      ...optionalProperty("description", description),
+      ...optionalProperty("defaultChoice", defaultChoice),
+      choices,
+    };
+  });
+}
+
+function parseEnvironment(
+  registryPath: string,
+  displayName: string,
+  location: string,
+  value: unknown,
+): Record<string, string> {
+  const environment = requireRecord(
+    registryPath,
+    displayName,
+    location,
+    value,
+  );
+  if (Object.keys(environment).length === 0) {
+    throw invalidLaunchOptions(
+      registryPath,
+      displayName,
+      `${location} must not be empty`,
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(environment).map(([name, entry]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        throw invalidLaunchOptions(
+          registryPath,
+          displayName,
+          `${location} contains invalid environment variable ${JSON.stringify(name)}`,
+        );
+      }
+      if (typeof entry !== "string") {
+        throw invalidLaunchOptions(
+          registryPath,
+          displayName,
+          `${location}.${name} must be a string`,
+        );
+      }
+      return [name, entry];
+    }),
+  );
+}
+
+function requireRecord(
+  registryPath: string,
+  displayName: string,
+  location: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidLaunchOptions(
+      registryPath,
+      displayName,
+      `${location} must be an object`,
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireIdentifier(
+  registryPath: string,
+  displayName: string,
+  location: string,
+  value: unknown,
+): string {
+  const identifier = requireNonEmptyString(
+    registryPath,
+    displayName,
+    location,
+    value,
+  );
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(identifier)) {
+    throw invalidLaunchOptions(
+      registryPath,
+      displayName,
+      `${location} must start with a letter and contain only letters, numbers, dots, underscores, or hyphens`,
+    );
+  }
+  return identifier;
+}
+
+function requireNonEmptyString(
+  registryPath: string,
+  displayName: string,
+  location: string,
+  value: unknown,
+): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidLaunchOptions(
+      registryPath,
+      displayName,
+      `${location} must be a non-empty string`,
+    );
+  }
+  return value;
+}
+
+function optionalNonEmptyString(
+  registryPath: string,
+  displayName: string,
+  location: string,
+  value: unknown,
+): string | undefined {
+  return value === undefined
+    ? undefined
+    : requireNonEmptyString(
+        registryPath,
+        displayName,
+        location,
+        value,
+      );
+}
+
+function optionalProperty<Key extends string, Value>(
+  key: Key,
+  value: Value | undefined,
+): { [Property in Key]?: Value } {
+  return value === undefined ? {} : ({ [key]: value } as { [Property in Key]: Value });
+}
+
+function invalidLaunchOptions(
+  registryPath: string,
+  displayName: string,
+  detail: string,
+): Error {
+  return new Error(
+    `Invalid model registry ${registryPath}: model ${JSON.stringify(displayName)} ${detail}.`,
+  );
 }
 
 async function resolveWorkspace(workspaceDir: string): Promise<string> {

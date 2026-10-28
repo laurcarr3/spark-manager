@@ -105,6 +105,112 @@ test("start streams output before the workspace command exits", async () => {
   );
 });
 
+test("start interactively applies a registry launch option", async () => {
+  await withWorkspaceScript(
+    "start.sh",
+    [
+      "#!/bin/sh",
+      'printf "%s\\n" "$MAX_MODEL_LEN" > selected-context.txt',
+      'printf "%s\\n" "$CACHE_PROFILE" >> selected-context.txt',
+      "",
+    ].join("\n"),
+    async (directory) => {
+      await writeRegistry(directory, {
+        "Test Model": {
+          workspaceDirectory: directory,
+          launchOptions: [
+            {
+              id: "context",
+              label: "Context window",
+              description: "Choose a recipe-defined launch profile.",
+              defaultChoice: "balanced",
+              choices: [
+                {
+                  id: "compact",
+                  label: "Compact",
+                  environment: {
+                    MAX_MODEL_LEN: "65536",
+                    CACHE_PROFILE: "compact",
+                  },
+                },
+                {
+                  id: "balanced",
+                  label: "Balanced",
+                  environment: {
+                    MAX_MODEL_LEN: "131072",
+                    CACHE_PROFILE: "balanced",
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = await runCliWithInput(
+        { home: directory },
+        "1\n",
+        "start",
+        "Test Model",
+      );
+
+      assert.equal(result.code, 0);
+      assert.match(result.stdout, /Context window/);
+      assert.match(result.stdout, /2\) Balanced \(default\)/);
+      assert.equal(
+        await readFile(join(directory, "selected-context.txt"), "utf8"),
+        "65536\ncompact\n",
+      );
+    },
+  );
+});
+
+test("start accepts a launch option default with Enter", async () => {
+  await withWorkspaceScript(
+    "start.sh",
+    '#!/bin/sh\nprintf "%s\\n" "$MAX_MODEL_LEN" > selected-context.txt\n',
+    async (directory) => {
+      await writeRegistry(directory, {
+        "Test Model": {
+          workspaceDirectory: directory,
+          launchOptions: [
+            {
+              id: "context",
+              label: "Context window",
+              defaultChoice: "balanced",
+              choices: [
+                {
+                  id: "compact",
+                  label: "Compact",
+                  environment: { MAX_MODEL_LEN: "65536" },
+                },
+                {
+                  id: "balanced",
+                  label: "Balanced",
+                  environment: { MAX_MODEL_LEN: "131072" },
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = await runCliWithInput(
+        { home: directory },
+        "\n",
+        "start",
+        "Test Model",
+      );
+
+      assert.equal(result.code, 0);
+      assert.equal(
+        await readFile(join(directory, "selected-context.txt"), "utf8"),
+        "131072\n",
+      );
+    },
+  );
+});
+
 test("start offers to stop a running registered model before switching", async () => {
   const home = await createModelSwitchFixture();
   try {
@@ -398,9 +504,9 @@ async function writeRegistry(home, models) {
   const configDirectory = join(home, ".spark-manager");
   await mkdir(configDirectory, { recursive: true });
   const registry = Object.fromEntries(
-    Object.entries(models).map(([displayName, workspaceDirectory]) => [
+    Object.entries(models).map(([displayName, entry]) => [
       displayName,
-      { workspaceDirectory },
+      typeof entry === "string" ? { workspaceDirectory: entry } : entry,
     ]),
   );
   await writeFile(

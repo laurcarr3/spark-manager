@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   getModelStatus,
   getRegisteredModel,
+  resolveLaunchEnvironment,
 } from "../dist/index.js";
 
 test("getModelStatus runs the command in the registered workspace", async () => {
@@ -73,6 +74,88 @@ test("the registry requires valid workspaceDirectory values", async () => {
         error.message.includes(
           'model "Test Model" must have a non-empty workspaceDirectory string',
         ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registry launch options resolve defaults and explicit selections", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "spark-manager-test-"));
+  try {
+    const registryPath = await writeRegistry(directory, {
+      "Test Model": {
+        workspaceDirectory: directory,
+        launchOptions: [
+          {
+            id: "context",
+            label: "Context window",
+            defaultChoice: "balanced",
+            choices: [
+              {
+                id: "compact",
+                label: "Compact",
+                environment: {
+                  MAX_MODEL_LEN: "65536",
+                  CACHE_PROFILE: "compact",
+                },
+              },
+              {
+                id: "balanced",
+                label: "Balanced",
+                environment: {
+                  MAX_MODEL_LEN: "131072",
+                  CACHE_PROFILE: "balanced",
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const model = await getRegisteredModel("Test Model", registryPath);
+
+    assert.deepEqual(resolveLaunchEnvironment(model), {
+      MAX_MODEL_LEN: "131072",
+      CACHE_PROFILE: "balanced",
+    });
+    assert.deepEqual(resolveLaunchEnvironment(model, { context: "compact" }), {
+      MAX_MODEL_LEN: "65536",
+      CACHE_PROFILE: "compact",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registry launch options reject invalid defaults", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "spark-manager-test-"));
+  try {
+    const registryPath = await writeRegistry(directory, {
+      "Test Model": {
+        workspaceDirectory: directory,
+        launchOptions: [
+          {
+            id: "context",
+            label: "Context window",
+            defaultChoice: "missing",
+            choices: [
+              {
+                id: "compact",
+                label: "Compact",
+                environment: { MAX_MODEL_LEN: "65536" },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    await assert.rejects(
+      getRegisteredModel("Test Model", registryPath),
+      (error) =>
+        error instanceof Error &&
+        error.message.includes("defaultChoice must match a choice id"),
     );
   } finally {
     await rm(directory, { recursive: true, force: true });

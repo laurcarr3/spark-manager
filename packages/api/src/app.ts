@@ -1,9 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   getModelStatus,
   getRegisteredModel,
   getRegisteredModels,
+  getRunningRegisteredModels,
   startRegisteredModel,
   stopModel,
   UnknownModelError,
@@ -18,11 +19,63 @@ import express, {
 export interface AppOptions {
   registryPath?: string;
   token?: string;
+  logger?: ApiLogger | false;
+}
+
+export interface ApiLogger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+interface RequestLogContext {
+  requestId: string;
+  startedAt: number;
 }
 
 export function createApp(options: AppOptions = {}): express.Express {
   const app = express();
+  const logger = options.logger === false ? undefined : (options.logger ?? console);
+  const requestLogContexts = new WeakMap<express.Request, RequestLogContext>();
+  const log = (
+    level: keyof ApiLogger,
+    event: string,
+    fields: Record<string, unknown>,
+  ): void => {
+    logger?.[level](JSON.stringify({ service: "spark-manager-api", event, ...fields }));
+  };
   app.disable("x-powered-by");
+
+  app.use((request, response, next) => {
+    if (!isModelLifecycleRequest(request)) {
+      next();
+      return;
+    }
+    const requestId = validRequestId(request.get("x-request-id")) ?? randomUUID();
+    const context = { requestId, startedAt: performance.now() };
+    requestLogContexts.set(request, context);
+    response.setHeader("x-request-id", requestId);
+    log("info", "request.started", {
+      requestId,
+      method: request.method,
+      path: request.originalUrl,
+      contentType: request.get("content-type") ?? null,
+      contentLength: request.get("content-length") ?? null,
+      authorizationPresent: Boolean(request.get("authorization")),
+      remoteAddress: request.ip,
+    });
+    response.once("finish", () => {
+      const durationMs = Math.round((performance.now() - context.startedAt) * 10) / 10;
+      log(response.statusCode >= 400 ? "warn" : "info", "request.completed", {
+        requestId,
+        method: request.method,
+        path: request.originalUrl,
+        status: response.statusCode,
+        durationMs,
+      });
+    });
+    next();
+  });
 
   if (options.token) {
     app.use(requireBearerToken(options.token));
@@ -63,6 +116,11 @@ export function createApp(options: AppOptions = {}): express.Express {
     response.json({ models });
   });
 
+  app.get("/models/running", async (_request, response) => {
+    const models = await getRunningRegisteredModels(options.registryPath);
+    response.json({ models });
+  });
+
   app.get("/models/:displayName/status", async (request, response) => {
     const displayName = parseDisplayName(request.params.displayName);
     const model = await getRegisteredModel(
@@ -95,7 +153,8 @@ export function createApp(options: AppOptions = {}): express.Express {
       }
       const body = bodyValue as Record<string, unknown>;
       const unexpectedKeys = Object.keys(body).filter(
-        (key) => key !== "switchRunning",
+        (key) =>
+          key !== "switchRunning" && key !== "launchOptionSelections",
       );
       if (unexpectedKeys.length > 0) {
         throw new HttpError(
@@ -115,9 +174,19 @@ export function createApp(options: AppOptions = {}): express.Express {
         );
       }
       const switchRunning = body.switchRunning ?? false;
+      const launchOptionSelections = parseLaunchOptionSelections(
+        body.launchOptionSelections,
+      );
+      log("info", "model.start.requested", {
+        requestId: requestLogContexts.get(request)?.requestId,
+        displayName,
+        switchRunning,
+        launchOptionSelections: launchOptionSelections ?? {},
+      });
       const result = await startRegisteredModel({
         displayName,
         registryPath: options.registryPath,
+        launchOptionSelections,
         confirmSwitch: async () => switchRunning,
       });
 
@@ -158,6 +227,10 @@ export function createApp(options: AppOptions = {}): express.Express {
     requireJsonRequest,
     async (request, response) => {
       const displayName = parseDisplayName(request.params.displayName);
+      log("info", "model.stop.requested", {
+        requestId: requestLogContexts.get(request)?.requestId,
+        displayName,
+      });
       const model = await getRegisteredModel(
         displayName,
         options.registryPath,
@@ -180,7 +253,18 @@ export function createApp(options: AppOptions = {}): express.Express {
     });
   });
 
-  const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  const errorHandler: ErrorRequestHandler = (error, request, response, _next) => {
+    const context = requestLogContexts.get(request);
+    if (context) {
+      log(error instanceof HttpError || error instanceof UnknownModelError || isBodyParserError(error)
+        ? "warn"
+        : "error", "request.failed", {
+        requestId: context.requestId,
+        method: request.method,
+        path: request.originalUrl,
+        error: describeError(error),
+      });
+    }
     if (error instanceof HttpError) {
       response.status(error.status).json({
         error: { code: error.code, message: error.message },
@@ -205,8 +289,6 @@ export function createApp(options: AppOptions = {}): express.Express {
       });
       return;
     }
-
-    console.error(error);
     response.status(500).json({
       error: {
         code: "INTERNAL_ERROR",
@@ -217,6 +299,30 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use(errorHandler);
 
   return app;
+}
+
+function validRequestId(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : undefined;
+}
+
+function isModelLifecycleRequest(request: express.Request): boolean {
+  return (
+    request.method === "POST" &&
+    /^\/models\/[^/]+\/(?:start|stop)$/.test(request.path)
+  );
+}
+
+function describeError(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) {
+    return { name: "UnknownError", message: String(error) };
+  }
+  return {
+    name: error.name,
+    message: error.message,
+    ...("code" in error ? { code: error.code } : {}),
+    ...("status" in error ? { status: error.status } : {}),
+    ...(error.stack ? { stack: error.stack } : {}),
+  };
 }
 
 class HttpError extends Error {
@@ -281,6 +387,33 @@ function parseDisplayName(value: unknown): string {
     );
   }
   return value;
+}
+
+function parseLaunchOptionSelections(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(
+      400,
+      "INVALID_REQUEST",
+      "launchOptionSelections must be an object.",
+    );
+  }
+  const selections: Record<string, string> = {};
+  for (const [optionId, choiceId] of Object.entries(value)) {
+    if (typeof choiceId !== "string") {
+      throw new HttpError(
+        400,
+        "INVALID_REQUEST",
+        `launchOptionSelections.${optionId} must be a string.`,
+      );
+    }
+    selections[optionId] = choiceId;
+  }
+  return selections;
 }
 
 function commandFailed(result: CommandResult): boolean {

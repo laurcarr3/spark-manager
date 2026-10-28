@@ -43,6 +43,76 @@ test("lists models and reports status for all or one model", async () => {
   await fixture.cleanup();
 });
 
+test("logs correlated request metadata without exposing authorization", async () => {
+  const fixture = await createFixture({ "Test Model": "stopped\n" });
+  const entries = [];
+  const logger = {
+    info: (message) => entries.push(JSON.parse(message)),
+    warn: (message) => entries.push(JSON.parse(message)),
+    error: (message) => entries.push(JSON.parse(message)),
+  };
+  await withApi({ logger, registryPath: fixture.registryPath }, async (baseUrl) => {
+    const quietResponse = await fetch(`${baseUrl}/models/status`);
+    assert.equal(quietResponse.status, 200);
+    assert.equal(entries.length, 0);
+
+    const response = await fetch(`${baseUrl}/models/Test%20Model/start`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer must-not-be-logged",
+        "content-type": "application/json",
+        "x-request-id": "browser-123",
+      },
+      body: "{}",
+    });
+    assert.equal(response.headers.get("x-request-id"), "browser-123");
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(entries[0].event, "request.started");
+  assert.equal(entries[0].requestId, "browser-123");
+  assert.equal(entries[0].authorizationPresent, true);
+  assert.equal(entries.at(-1).event, "request.completed");
+  assert.equal(entries.at(-1).status, 200);
+  assert.equal(JSON.stringify(entries).includes("must-not-be-logged"), false);
+  await fixture.cleanup();
+});
+
+test("reports running models without invoking recipe status commands", async () => {
+  const fixture = await createFixture({ "Test Model": "must-not-run\n" });
+  const originalPath = process.env.PATH;
+  const binDirectory = join(fixture.directory, "bin");
+  await mkdir(binDirectory);
+  await writeExecutable(
+    join(binDirectory, "docker"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  ps) printf '%s\\n' container-id ;;",
+      `  inspect) printf '%s' '${JSON.stringify([{
+        Config: { Labels: {} },
+        Mounts: [{ Source: fixture.workspaces["Test Model"] }],
+      }])}' ;;`,
+      "  *) exit 2 ;;",
+      "esac",
+      "",
+    ].join("\n"),
+  );
+  process.env.PATH = `${binDirectory}:${originalPath}`;
+
+  try {
+    await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/models/running`);
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.models[0].displayName, "Test Model");
+    });
+  } finally {
+    process.env.PATH = originalPath;
+    await fixture.cleanup();
+  }
+});
+
 test("starts and stops a registered model", async () => {
   const fixture = await createFixture({ "Test Model": "stopped\n" });
   const workspace = fixture.workspaces["Test Model"];
@@ -78,6 +148,46 @@ test("starts and stops a registered model", async () => {
   await fixture.cleanup();
 });
 
+test("passes registry launch option selections to the recipe", async () => {
+  const fixture = await createFixture({ "Test Model": "stopped\n" });
+  const workspace = fixture.workspaces["Test Model"];
+  await writeFile(
+    fixture.registryPath,
+    JSON.stringify({
+      "Test Model": {
+        workspaceDirectory: workspace,
+        launchOptions: [{
+          id: "context-profile",
+          label: "Context profile",
+          defaultChoice: "recipe-default",
+          choices: [
+            { id: "compact", label: "Compact", environment: { CONTEXT: "65536" } },
+            { id: "recipe-default", label: "Default", environment: { CONTEXT: "262144" } },
+          ],
+        }],
+      },
+    }),
+  );
+  await writeExecutable(
+    join(workspace, "start.sh"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "ps" ]; then printf "stopped\\n"; exit; fi',
+      'printf "%s\\n" "$CONTEXT" > selected.txt',
+      "",
+    ].join("\n"),
+  );
+
+  await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
+    const response = await postJson(`${baseUrl}/models/Test%20Model/start`, {
+      launchOptionSelections: { "context-profile": "compact" },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(await readFile(join(workspace, "selected.txt"), "utf8"), "65536\n");
+  });
+  await fixture.cleanup();
+});
+
 test("requires JSON for mutations and validates start options", async () => {
   const fixture = await createFixture({ "Test Model": "stopped\n" });
   await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
@@ -98,6 +208,12 @@ test("requires JSON for mutations and validates start options", async () => {
         message: "switchRunning must be a boolean.",
       },
     });
+
+    const invalidSelectionsResponse = await postJson(
+      `${baseUrl}/models/Test%20Model/start`,
+      { launchOptionSelections: [] },
+    );
+    assert.equal(invalidSelectionsResponse.status, 400);
   });
   await fixture.cleanup();
 });
@@ -220,7 +336,7 @@ async function createFixture(statuses) {
 }
 
 async function withApi(options, run) {
-  const server = createApp(options).listen(0, "127.0.0.1");
+  const server = createApp({ logger: false, ...options }).listen(0, "127.0.0.1");
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
     server.once("error", reject);

@@ -1,11 +1,98 @@
 {
   "deepseek-v4": {
-    "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark"
+    "workspaceDirectory": "/home/calvin/Desktop/DeepSeek-v4-Flash-One-DGX-Spark",
+    "launchOptions": [
+      {
+        "id": "context-profile",
+        "label": "Context profile",
+        "description": "Profiles are recipe-owned environment settings; calibrate non-default profiles on your machine.",
+        "defaultChoice": "recipe-default",
+        "choices": [
+          {
+            "id": "compact",
+            "label": "Compact (65K, calibration candidate)",
+            "environment": {
+              "MAX_MODEL_LEN": "65536",
+              "GPU_MEMORY_UTILIZATION": "0.90"
+            }
+          },
+          {
+            "id": "recipe-default",
+            "label": "Recipe default (384K)",
+            "environment": {
+              "MAX_MODEL_LEN": "384000",
+              "GPU_MEMORY_UTILIZATION": "0.94"
+            }
+          }
+        ]
+      }
+    ]
   },
   "qwen3.8-27b": {
-    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-27B-SGLang-DGX-Spark"
+    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-27B-SGLang-DGX-Spark",
+    "launchOptions": [
+      {
+        "id": "capacity-profile",
+        "label": "Capacity profile",
+        "description": "The conservative profile uses SGLang flags that must be verified against the pinned image.",
+        "defaultChoice": "recipe-default",
+        "choices": [
+          {
+            "id": "conservative",
+            "label": "Conservative (2 full 262K requests, calibration candidate)",
+            "environment": {
+              "CONTEXT_LENGTH": "262144",
+              "MAX_CONCURRENT_REQUESTS": "4",
+              "EXTRA_ARGS": "--max-total-tokens 655360 --mem-fraction-static 0.835"
+            }
+          },
+          {
+            "id": "recipe-default",
+            "label": "Recipe default",
+            "environment": {
+              "CONTEXT_LENGTH": "262144",
+              "MAX_CONCURRENT_REQUESTS": "16"
+            }
+          }
+        ]
+      }
+    ]
   },
-  "qwen3.8-flash-next": {
-    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark"
+  "qwen3.8-flash-next-tensorfold": {
+    "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold",
+    "launchOptions": [
+      {
+        "id": "context-profile",
+        "label": "Context profile",
+        "description": "Each profile coordinates the TensorFold context and concurrency settings.",
+        "defaultChoice": "recipe-default",
+        "choices": [
+          {
+            "id": "compact",
+            "label": "Compact (65K, calibration candidate)",
+            "environment": {
+              "CONTEXT": "65536",
+              "PARALLEL": "1"
+            }
+          },
+          {
+            "id": "balanced",
+            "label": "Balanced (131K, calibration candidate)",
+            "environment": {
+              "CONTEXT": "131072",
+              "PARALLEL": "2"
+            }
+          },
+          {
+            "id": "recipe-default",
+            "label": "Recipe default (262K)",
+            "environment": {
+              "CONTEXT": "262144",
+              "PARALLEL": "5"
+            }
+          }
+        ]
+      }
+    ]
   }
 }

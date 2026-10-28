@@ -9,6 +9,7 @@ import {
   startRegisteredModel,
   stopModel,
   type CommandResult,
+  type LaunchOption,
 } from "@spark-manager/core";
 
 const HELP = `spark-manager
@@ -68,22 +69,35 @@ async function runStartCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  const result = await startRegisteredModel({
-    displayName: modelDisplayName,
-    onStdout: writeStdout,
-    onStderr: writeStderr,
-    confirmSwitch: async (runningModels) => {
-      const runningNames = runningModels
-        .map((model) => JSON.stringify(model.displayName))
-        .join(", ");
-      return promptYesNo(
-        `${runningModels.length === 1 ? "Model" : "Models"} ${runningNames} ${runningModels.length === 1 ? "is" : "are"} running. Stop ${runningModels.length === 1 ? "it" : "them"} and start ${JSON.stringify(modelDisplayName)}? [y/N] `,
-      );
-    },
-    onStopping: (model) => {
-      console.log(`Stopping ${JSON.stringify(model.displayName)}...`);
-    },
-  });
+  const model = await getRegisteredModel(modelDisplayName);
+  const prompt = new PromptSession();
+  let result: Awaited<ReturnType<typeof startRegisteredModel>>;
+  try {
+    const launchOptionSelections = await promptForLaunchOptions(
+      model.launchOptions ?? [],
+      prompt,
+    );
+    result = await startRegisteredModel({
+      displayName: modelDisplayName,
+      launchOptionSelections,
+      onStdout: writeStdout,
+      onStderr: writeStderr,
+      confirmSwitch: async (runningModels) => {
+        const runningNames = runningModels
+          .map((runningModel) => JSON.stringify(runningModel.displayName))
+          .join(", ");
+        return promptYesNo(
+          prompt,
+          `${runningModels.length === 1 ? "Model" : "Models"} ${runningNames} ${runningModels.length === 1 ? "is" : "are"} running. Stop ${runningModels.length === 1 ? "it" : "them"} and start ${JSON.stringify(modelDisplayName)}? [y/N] `,
+        );
+      },
+      onStopping: (runningModel) => {
+        console.log(`Stopping ${JSON.stringify(runningModel.displayName)}...`);
+      },
+    });
+  } finally {
+    prompt.close();
+  }
 
   if (result.outcome === "cancelled") {
     console.error("Start cancelled.");
@@ -211,28 +225,114 @@ function parseDisplayName(args: string[]): string | undefined {
   return args[0]?.trim() ? args[0] : undefined;
 }
 
-async function promptYesNo(question: string): Promise<boolean> {
-  const readline = createInterface({
+async function promptForLaunchOptions(
+  options: readonly LaunchOption[],
+  prompt: PromptSession,
+): Promise<Record<string, string>> {
+  const selections: Record<string, string> = {};
+  for (const option of options) {
+    console.log(`\n${option.label}`);
+    if (option.description) {
+      console.log(option.description);
+    }
+    option.choices.forEach((choice, index) => {
+      const defaultMarker =
+        choice.id === option.defaultChoice ? " (default)" : "";
+      console.log(`  ${index + 1}) ${choice.label}${defaultMarker}`);
+      if (choice.description) {
+        console.log(`     ${choice.description}`);
+      }
+    });
+
+    while (true) {
+      const defaultChoiceIndex = option.defaultChoice
+        ? option.choices.findIndex(
+            (choice) => choice.id === option.defaultChoice,
+          )
+        : -1;
+      const defaultPrompt =
+        defaultChoiceIndex >= 0 ? ` [${defaultChoiceIndex + 1}]` : "";
+      const answer = await prompt.question(
+        `Select 1-${option.choices.length}${defaultPrompt}: `,
+      );
+      if (answer === undefined) {
+        throw new Error("Interactive launch option selection was cancelled.");
+      }
+
+      const normalizedAnswer = answer.trim();
+      const selectedNumber = Number(normalizedAnswer);
+      const choice =
+        normalizedAnswer === "" && defaultChoiceIndex >= 0
+          ? option.choices[defaultChoiceIndex]
+          : (Number.isSafeInteger(selectedNumber)
+              ? option.choices[selectedNumber - 1]
+              : undefined) ??
+            option.choices.find(
+              (candidate) => candidate.id === normalizedAnswer,
+            );
+      if (choice) {
+        selections[option.id] = choice.id;
+        break;
+      }
+      console.error(
+        `Choose a number from 1 to ${option.choices.length}${option.defaultChoice ? ", or press Enter for the default" : ""}.`,
+      );
+    }
+  }
+  return selections;
+}
+
+async function promptYesNo(
+  prompt: PromptSession,
+  question: string,
+): Promise<boolean> {
+  const answer = await prompt.question(question);
+  return answer !== undefined && ["y", "yes"].includes(answer.trim().toLowerCase());
+}
+
+class PromptSession {
+  readonly #readline = createInterface({
     input: process.stdin,
     output: process.stdout,
   });
+  readonly #answers: string[] = [];
+  readonly #waiters: Array<(answer: string | undefined) => void> = [];
+  #closed = false;
 
-  return new Promise((resolveAnswer) => {
-    let answered = false;
-    const finish = (answer: boolean) => {
-      if (answered) {
-        return;
+  constructor() {
+    this.#readline.on("line", (answer) => {
+      const waiter = this.#waiters.shift();
+      if (waiter) {
+        waiter(answer);
+      } else {
+        this.#answers.push(answer);
       }
-      answered = true;
-      readline.close();
-      resolveAnswer(answer);
-    };
-
-    readline.once("close", () => finish(false));
-    readline.question(question, (answer) => {
-      finish(["y", "yes"].includes(answer.trim().toLowerCase()));
     });
-  });
+    this.#readline.once("close", () => {
+      this.#closed = true;
+      for (const waiter of this.#waiters.splice(0)) {
+        waiter(undefined);
+      }
+    });
+  }
+
+  question(question: string): Promise<string | undefined> {
+    process.stdout.write(question);
+    const queuedAnswer = this.#answers.shift();
+    if (queuedAnswer !== undefined) {
+      return Promise.resolve(queuedAnswer);
+    }
+    if (this.#closed) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolveAnswer) => this.#waiters.push(resolveAnswer));
+  }
+
+  close(): void {
+    if (!this.#closed) {
+      this.#readline.close();
+    }
+  }
 }
 
 try {
