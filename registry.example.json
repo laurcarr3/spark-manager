@@ -30,6 +30,7 @@
   },
   "qwen3.8-27b": {
     "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-27B-SGLang-DGX-Spark",
+    "containerNames": ["qwen3.8-27b-sglang"],
     "launchOptions": [
       {
         "id": "capacity-profile",
@@ -60,6 +61,7 @@
   },
   "qwen3.8-flash-next-tensorfold": {
     "workspaceDirectory": "/home/calvin/Desktop/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold",
+    "containerNames": ["qwen38-flash-next-tf"],
     "launchOptions": [
       {
         "id": "context-profile",

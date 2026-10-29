@@ -3,9 +3,10 @@
 import { createInterface } from "node:readline";
 
 import {
-  getModelStatus,
+  getModelStatuses,
   getRegisteredModel,
   getRegisteredModels,
+  getRegisteredModelStatus,
   startRegisteredModel,
   stopModel,
   type CommandResult,
@@ -27,7 +28,7 @@ Usage:
 Commands:
   start      Start a registered model
   stop       Stop a registered model
-  status     Check every registered model's status
+  status     Show every registered model's status from Docker
   list       List registered models and their workspaces
   help       Show this help message
   version    Show the current version
@@ -127,29 +128,29 @@ async function runStatusCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  const models = args[0]
-    ? [await getRegisteredModel(args[0])]
-    : await getRegisteredModels();
-  let exitCode = 0;
-  for (const model of models) {
-    console.log(`${model.displayName}:`);
-    try {
-      const result = await getModelStatus({ displayName: model.displayName });
-      writeCommandOutput(result, true);
-      if (result.signal) {
-        console.error(
-          `Status command for ${JSON.stringify(model.displayName)} terminated by ${result.signal}.`,
-        );
-      }
-      if (exitCode === 0 && result.exitCode !== 0) {
-        exitCode = result.exitCode;
-      }
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
-      exitCode = exitCode || 1;
-    }
+  const statuses = args[0]
+    ? [await getRegisteredModelStatus(args[0])]
+    : await getModelStatuses();
+  for (const status of statuses) {
+    const containerNames = status.runtime.containers
+      .filter((container) => container.running)
+      .map((container) => container.name ?? container.id.slice(0, 12));
+    console.log(
+      [
+        status.displayName,
+        status.lifecycleState,
+        ...(containerNames.length > 0 ? [containerNames.join(",")] : []),
+      ].join("\t"),
+    );
   }
-  return exitCode;
+
+  const runtimeError = statuses.find((status) => !status.runtime.observed)
+    ?.runtime.error;
+  if (runtimeError) {
+    console.error(runtimeError);
+    return 1;
+  }
+  return 0;
 }
 
 async function runListCommand(args: string[]): Promise<number> {
@@ -198,24 +199,6 @@ function writeStdout(chunk: string): void {
 
 function writeStderr(chunk: string): void {
   process.stderr.write(chunk);
-}
-
-function writeCommandOutput(
-  result: CommandResult,
-  ensureFinalNewline = false,
-): void {
-  if (result.stdout) {
-    process.stdout.write(result.stdout);
-    if (ensureFinalNewline && !result.stdout.endsWith("\n")) {
-      process.stdout.write("\n");
-    }
-  }
-  if (result.stderr) {
-    process.stderr.write(result.stderr);
-    if (ensureFinalNewline && !result.stderr.endsWith("\n")) {
-      process.stderr.write("\n");
-    }
-  }
 }
 
 function parseDisplayName(args: string[]): string | undefined {

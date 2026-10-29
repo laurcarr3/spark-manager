@@ -38,8 +38,16 @@ cp registry.example.json ~/.spark-manager/registry.json
 Edit the copied file so every `workspaceDirectory` points to the corresponding
 local recipe checkout. Each object key is the model name used by the CLI, and
 model names must be non-empty. Each `workspaceDirectory` must exist. The CLI
-runs `./start.sh`, `./stop.sh`, and `./start.sh ps` in the registered workspace
-without invoking a shell.
+runs `./start.sh` and `./stop.sh` in the registered workspace without invoking a
+shell. Status never runs recipe scripts (some recipes start the model when given
+`ps`); it is read from Docker instead.
+
+Spark Manager links Docker containers to a model when a container mounts a path
+inside the workspace or carries a Compose `working_dir` label inside it. Recipes
+that start a plain `docker run` container with neither (such as TensorFold, which
+mounts only cache directories) must list their container names in the optional
+`containerNames` array, for example `"containerNames": ["qwen38-flash-next-tf"]`.
+Otherwise a running model is reported as stopped and the switch check misses it.
 
 Registry entries may also declare interactive launch options. Spark Manager does
 not interpret these as memory settings or runtime flags: each choice is simply a
@@ -97,6 +105,10 @@ pnpm dev:cli status deepseek-v4
 pnpm dev:cli list
 ```
 
+`status` prints one tab-separated line per model: the display name, its state
+(`running`, `stopped`, or `unknown` when Docker cannot be queried), and the names
+of its running containers. It exits with status 1 when Docker is unavailable.
+
 Before starting a model, the CLI checks running Docker containers for mounts or
 Compose metadata associated with the other registered workspaces. If another
 registered model is running, it asks for confirmation before stopping that
@@ -125,7 +137,55 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:3000/models/DeepSeek-v4/stop
 ```
 
-Model names in URLs must be URL-encoded. A start request returns `409` when
+Model names in URLs must be URL-encoded. Unknown names return `404`
+`MODEL_NOT_FOUND`.
+
+### Status
+
+`GET /models/status` returns `{ "models": [...] }` and
+`GET /models/:displayName/status` returns `{ "model": {...} }`. Status is
+derived from Docker; recipe scripts are never run. A container belongs to a model
+when its name is listed in the model's `containerNames`, or when its Compose
+`working_dir` label or any mount source is inside the model's workspace.
+
+```jsonc
+{
+  "displayName": "qwen3.8-27b",
+  "lifecycleState": "running",   // "running", "stopped", or "unknown"
+  "runtime": {
+    "observed": true,            // false when Docker could not be queried
+    "present": true,             // a container owned by the workspace is running
+    "containers": [
+      {
+        "id": "4f0c…",
+        "name": "qwen-sglang",
+        "running": true,
+        "restarting": false,
+        "status": "running",     // Docker State.Status
+        "exitCode": null,        // set only for stopped containers
+        "oomKilled": false,
+        "restartCount": 0,
+        "startedAt": "2026-10-29T09:12:44.123Z",
+        "finishedAt": null
+      }
+    ],
+    "error": null                // the Docker error when observed is false
+  }
+}
+```
+
+`containers` lists running and recently exited containers, newest first. If
+Docker is unavailable the endpoints still return `200`, with
+`lifecycleState: "unknown"`, `observed: false`, and the error message.
+
+**Breaking change:** the status endpoints previously returned the output of
+`./start.sh ps` (`command.stdout`, `command.exitCode`) alongside the registry
+entry. They now return the structure above, without registry fields; use
+`GET /models` for those.
+
+### Start and stop
+
+A start request returns `409` when
 another registered model is running unless `switchRunning` is `true`. Mutation
 requests require a JSON content type, which also prevents ordinary cross-origin
 HTML forms from triggering local lifecycle operations.

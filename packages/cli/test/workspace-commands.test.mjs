@@ -277,63 +277,100 @@ test("start leaves the running model alone when switching is declined", async ()
   }
 });
 
-test("status checks every registered model", async () => {
+test("status reports every registered model from Docker without running recipes", async () => {
   const home = await mkdtemp(join(tmpdir(), "spark-manager-cli-test-"));
   try {
     const firstWorkspace = join(home, "first");
     const secondWorkspace = join(home, "second");
     await mkdir(firstWorkspace);
     await mkdir(secondWorkspace);
-    await writeExecutable(
-      join(firstWorkspace, "start.sh"),
-      '#!/bin/sh\ntest "$1" = "ps"\nprintf "running\\n"\n',
-    );
-    await writeExecutable(
-      join(secondWorkspace, "start.sh"),
-      '#!/bin/sh\ntest "$1" = "ps"\nprintf "stopped\\n"\n',
-    );
+    for (const workspace of [firstWorkspace, secondWorkspace]) {
+      await writeExecutable(
+        join(workspace, "start.sh"),
+        '#!/bin/sh\n: > started.txt\n',
+      );
+    }
     await writeRegistry(home, {
       "First Model": firstWorkspace,
       "Second Model": secondWorkspace,
     });
+    await installDockerStub(home);
 
-    const { stdout, stderr } = await runCli({ home }, "status");
+    const { stdout, stderr } = await runCli(
+      {
+        home,
+        env: dockerStubEnvironment(home, [
+          { Name: "/first-server", Mounts: [{ Source: firstWorkspace }] },
+        ]),
+      },
+      "status",
+    );
 
-    assert.equal(stdout, "First Model:\nrunning\nSecond Model:\nstopped\n");
+    assert.equal(
+      stdout,
+      "First Model\trunning\tfirst-server\nSecond Model\tstopped\n",
+    );
+    assert.equal(stderr, "");
+    await assert.rejects(readFile(join(firstWorkspace, "started.txt")));
+    await assert.rejects(readFile(join(secondWorkspace, "started.txt")));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("status reports an individual registered model", async () => {
+  const home = await mkdtemp(join(tmpdir(), "spark-manager-cli-test-"));
+  try {
+    const firstWorkspace = join(home, "first");
+    const secondWorkspace = join(home, "second");
+    await mkdir(firstWorkspace);
+    await mkdir(secondWorkspace);
+    await writeRegistry(home, {
+      "First Model": firstWorkspace,
+      "Second Model": secondWorkspace,
+    });
+    await installDockerStub(home);
+
+    const { stdout, stderr } = await runCli(
+      {
+        home,
+        env: dockerStubEnvironment(home, [
+          { Name: "/first-server", Mounts: [{ Source: firstWorkspace }] },
+        ]),
+      },
+      "status",
+      "Second Model",
+    );
+
+    assert.equal(stdout, "Second Model\tstopped\n");
     assert.equal(stderr, "");
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("status checks an individual registered model", async () => {
+test("status reports unknown when Docker cannot be queried", async () => {
   const home = await mkdtemp(join(tmpdir(), "spark-manager-cli-test-"));
   try {
-    const firstWorkspace = join(home, "first");
-    const secondWorkspace = join(home, "second");
-    await mkdir(firstWorkspace);
-    await mkdir(secondWorkspace);
+    const workspace = join(home, "first");
+    await mkdir(workspace);
+    await writeRegistry(home, { "First Model": workspace });
+    const binDirectory = join(home, "bin");
+    await mkdir(binDirectory);
     await writeExecutable(
-      join(firstWorkspace, "start.sh"),
-      '#!/bin/sh\nprintf "running\\n"\n',
+      join(binDirectory, "docker"),
+      "#!/bin/sh\necho 'daemon unavailable' >&2\nexit 1\n",
     );
-    await writeExecutable(
-      join(secondWorkspace, "start.sh"),
-      '#!/bin/sh\nprintf "stopped\\n"\n',
-    );
-    await writeRegistry(home, {
-      "First Model": firstWorkspace,
-      "Second Model": secondWorkspace,
-    });
 
-    const { stdout, stderr } = await runCli(
-      { home },
+    const result = await runCliWithInput(
+      { home, env: { PATH: `${binDirectory}:${process.env.PATH}` } },
+      "",
       "status",
-      "Second Model",
     );
 
-    assert.equal(stdout, "Second Model:\nstopped\n");
-    assert.equal(stderr, "");
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "First Model\tunknown\n");
+    assert.equal(result.stderr, "Unable to query Docker: daemon unavailable\n");
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -496,7 +533,13 @@ async function installDockerStub(home) {
 function dockerStubEnvironment(home, inspections) {
   return {
     PATH: `${join(home, "bin")}:${process.env.PATH}`,
-    FAKE_DOCKER_INSPECTIONS: JSON.stringify(inspections),
+    FAKE_DOCKER_INSPECTIONS: JSON.stringify(
+      inspections.map((inspection, index) => ({
+        Id: `container-${index}`,
+        State: { Running: true, Status: "running" },
+        ...inspection,
+      })),
+    ),
   };
 }
 

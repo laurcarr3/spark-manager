@@ -1,15 +1,26 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 import {
-  mkdir,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+  DockerRuntimeController,
+  type RuntimeContainer,
+  type RuntimeController,
+} from "./runtime.js";
+import {
+  defaultRegistryPath,
+  errorMessage,
+  isNodeError,
+  resolveWorkspace,
+} from "./workspace.js";
+
+export {
+  DockerRuntimeController,
+  type RuntimeContainer,
+  type RuntimeController,
+  type RuntimeWorkspace,
+} from "./runtime.js";
+export { defaultRegistryPath } from "./workspace.js";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -56,6 +67,8 @@ export interface LaunchOption {
 export interface RegisteredModel {
   displayName: string;
   workspaceDirectory: string;
+  /** Docker container names owned by the model, for recipes whose containers neither mount the workspace nor carry Compose labels. */
+  containerNames?: readonly string[];
   launchOptions?: readonly LaunchOption[];
 }
 
@@ -63,6 +76,7 @@ export interface StartRegisteredModelOptions extends ModelCommandOptions {
   launchOptionSelections?: Readonly<Record<string, string>>;
   confirmSwitch?: (runningModels: readonly RegisteredModel[]) => Promise<boolean>;
   onStopping?: (model: RegisteredModel) => void;
+  runtime?: RuntimeController;
 }
 
 export type StartRegisteredModelResult =
@@ -90,16 +104,23 @@ export class UnknownModelError extends Error {
   }
 }
 
-interface DockerContainerInspection {
-  Config?: {
-    Labels?: Record<string, string> | null;
-  };
-  Mounts?: Array<{
-    Source?: string;
-  }>;
+export type LifecycleState = "stopped" | "running" | "unknown";
+
+export interface RuntimeObservation {
+  /** False when Docker could not be queried. */
+  observed: boolean;
+  /** True when any container owned by the workspace is running. */
+  present: boolean;
+  containers: RuntimeContainer[];
+  error: string | null;
 }
 
-const DEFAULT_STATUS_COMMAND = ["./start.sh", "ps"] as const;
+export interface RegisteredModelStatus {
+  displayName: string;
+  lifecycleState: LifecycleState;
+  runtime: RuntimeObservation;
+}
+
 const DEFAULT_START_COMMAND = ["./start.sh"] as const;
 const DEFAULT_STOP_COMMAND = ["./stop.sh"] as const;
 
@@ -120,7 +141,7 @@ export async function startRegisteredModel(
       (model) => model.displayName !== options.displayName,
     );
     const runningModels = hasOtherModels
-      ? (await getRunningRegisteredModels(registryPath)).filter(
+      ? (await getRunningRegisteredModels(registryPath, options.runtime)).filter(
           (model) => model.displayName !== options.displayName,
         )
       : [];
@@ -161,14 +182,53 @@ export async function startRegisteredModel(
   }
 }
 
-export async function getModelStatus(
-  options: ModelCommandOptions,
-): Promise<CommandResult> {
-  return runModelCommand(
-    options,
-    options.command ?? DEFAULT_STATUS_COMMAND,
-    "Status",
-  );
+/** Reports every registered model's status from Docker without running recipe scripts. */
+export async function getModelStatuses(
+  registryPath = defaultRegistryPath(),
+  runtime: RuntimeController = new DockerRuntimeController(),
+): Promise<RegisteredModelStatus[]> {
+  return inspectModelStatuses(await getRegisteredModels(registryPath), runtime);
+}
+
+export async function getRegisteredModelStatus(
+  displayName: string,
+  registryPath = defaultRegistryPath(),
+  runtime: RuntimeController = new DockerRuntimeController(),
+): Promise<RegisteredModelStatus> {
+  const model = await getRegisteredModel(displayName, registryPath);
+  const [status] = await inspectModelStatuses([model], runtime);
+  return status!;
+}
+
+async function inspectModelStatuses(
+  models: readonly RegisteredModel[],
+  runtime: RuntimeController,
+): Promise<RegisteredModelStatus[]> {
+  let containersByModel: Map<string, RuntimeContainer[]>;
+  try {
+    containersByModel = await runtime.inspect(models);
+  } catch (error) {
+    return models.map((model) => ({
+      displayName: model.displayName,
+      lifecycleState: "unknown",
+      runtime: {
+        observed: false,
+        present: false,
+        containers: [],
+        error: errorMessage(error),
+      },
+    }));
+  }
+
+  return models.map((model) => {
+    const containers = containersByModel.get(model.displayName) ?? [];
+    const present = containers.some((container) => container.running);
+    return {
+      displayName: model.displayName,
+      lifecycleState: present ? "running" : "stopped",
+      runtime: { observed: true, present, containers, error: null },
+    };
+  });
 }
 
 export async function startModel(
@@ -291,49 +351,15 @@ export async function getRegisteredModels(
 
 export async function getRunningRegisteredModels(
   registryPath = defaultRegistryPath(),
+  runtime: RuntimeController = new DockerRuntimeController(),
 ): Promise<RegisteredModel[]> {
   const models = await getRegisteredModels(registryPath);
-  const containerIds = (await runDockerCommand(["ps", "--quiet", "--no-trunc"]))
-    .split("\n")
-    .map((id) => id.trim())
-    .filter(Boolean);
-
-  if (containerIds.length === 0) {
-    return [];
-  }
-
-  let inspections: unknown;
-  try {
-    inspections = JSON.parse(
-      await runDockerCommand(["inspect", ...containerIds]),
-    );
-  } catch (error) {
-    throw new Error(
-      `Unable to inspect running Docker containers: ${errorMessage(error)}`,
-      { cause: error },
-    );
-  }
-
-  if (!Array.isArray(inspections)) {
-    throw new Error(
-      "Unable to inspect running Docker containers: expected a JSON array.",
-    );
-  }
-
-  const workspaces = await Promise.all(
-    models.map(async (model) => ({
-      model,
-      workspaceDirectory: await resolveWorkspace(model.workspaceDirectory),
-    })),
+  const containersByModel = await runtime.inspect(models);
+  return models.filter((model) =>
+    containersByModel
+      .get(model.displayName)
+      ?.some((container) => container.running),
   );
-
-  return workspaces
-    .filter(({ workspaceDirectory }) =>
-      inspections.some((inspection) =>
-        containerBelongsToWorkspace(inspection, workspaceDirectory),
-      ),
-    )
-    .map(({ model }) => model);
 }
 
 function parseRegistryEntry(
@@ -353,6 +379,10 @@ function parseRegistryEntry(
     );
   }
 
+  const containerNames =
+    "containerNames" in entry
+      ? parseContainerNames(registryPath, displayName, entry.containerNames)
+      : undefined;
   const launchOptions =
     "launchOptions" in entry
       ? parseLaunchOptions(registryPath, displayName, entry.launchOptions)
@@ -361,8 +391,29 @@ function parseRegistryEntry(
   return {
     displayName,
     workspaceDirectory: entry.workspaceDirectory,
+    ...(containerNames ? { containerNames } : {}),
     ...(launchOptions ? { launchOptions } : {}),
   };
+}
+
+function parseContainerNames(
+  registryPath: string,
+  displayName: string,
+  value: unknown,
+): string[] {
+  // Docker's own container name rule.
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (name) =>
+        typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name),
+    )
+  ) {
+    throw new Error(
+      `Invalid model registry ${registryPath}: model ${JSON.stringify(displayName)} containerNames must be an array of Docker container names.`,
+    );
+  }
+  return value;
 }
 
 export function resolveLaunchEnvironment(
@@ -667,88 +718,6 @@ function invalidLaunchOptions(
   );
 }
 
-async function resolveWorkspace(workspaceDir: string): Promise<string> {
-  try {
-    const workspaceStats = await stat(workspaceDir);
-    if (!workspaceStats.isDirectory()) {
-      throw new Error("path is not a directory");
-    }
-    return await realpath(workspaceDir);
-  } catch (error) {
-    throw new Error(
-      `Invalid workspace ${workspaceDir}: ${errorMessage(error)}`,
-      { cause: error },
-    );
-  }
-}
-
-function containerBelongsToWorkspace(
-  value: unknown,
-  workspaceDirectory: string,
-): boolean {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const inspection = value as DockerContainerInspection;
-  const composeWorkspace =
-    inspection.Config?.Labels?.["com.docker.compose.project.working_dir"];
-  if (
-    composeWorkspace &&
-    pathIsWithinWorkspace(workspaceDirectory, composeWorkspace)
-  ) {
-    return true;
-  }
-
-  return (
-    inspection.Mounts?.some(
-      (mount) =>
-        typeof mount.Source === "string" &&
-        pathIsWithinWorkspace(workspaceDirectory, mount.Source),
-    ) ?? false
-  );
-}
-
-function pathIsWithinWorkspace(
-  workspaceDirectory: string,
-  candidatePath: string,
-): boolean {
-  const pathFromWorkspace = relative(
-    workspaceDirectory,
-    resolve(candidatePath),
-  );
-  return (
-    pathFromWorkspace === "" ||
-    (!pathFromWorkspace.startsWith("..") && !isAbsolute(pathFromWorkspace))
-  );
-}
-
-function runDockerCommand(args: readonly string[]): Promise<string> {
-  return new Promise((resolveCommand, reject) => {
-    execFile(
-      "docker",
-      args,
-      { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(
-            new Error(
-              `Unable to query Docker: ${stderr.trim() || error.message}`,
-              { cause: error },
-            ),
-          );
-          return;
-        }
-        resolveCommand(stdout);
-      },
-    );
-  });
-}
-
-function defaultRegistryPath(): string {
-  return join(homedir(), ".spark-manager", "registry.json");
-}
-
 async function acquireLifecycleLock(
   registryPath: string,
 ): Promise<() => Promise<void>> {
@@ -816,12 +785,4 @@ function processIsRunning(pid: number): boolean {
   } catch (error) {
     return !isNodeError(error) || error.code !== "ESRCH";
   }
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

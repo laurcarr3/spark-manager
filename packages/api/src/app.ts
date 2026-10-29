@@ -1,15 +1,17 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
-  getModelStatus,
+  DockerRuntimeController,
+  getModelStatuses,
   getRegisteredModel,
   getRegisteredModels,
+  getRegisteredModelStatus,
   getRunningRegisteredModels,
   startRegisteredModel,
   stopModel,
   UnknownModelError,
   type CommandResult,
-  type RegisteredModel,
+  type RuntimeController,
 } from "@spark-manager/core";
 import express, {
   type ErrorRequestHandler,
@@ -20,6 +22,10 @@ export interface AppOptions {
   registryPath?: string;
   token?: string;
   logger?: ApiLogger | false;
+  lifecycle?: {
+    /** Test-only: a fake runtime used instead of querying Docker. Leave unset in production. */
+    runtime?: RuntimeController;
+  };
 }
 
 export interface ApiLogger {
@@ -37,6 +43,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   const app = express();
   const logger = options.logger === false ? undefined : (options.logger ?? console);
   const requestLogContexts = new WeakMap<express.Request, RequestLogContext>();
+  const runtime = options.lifecycle?.runtime ?? new DockerRuntimeController();
   const log = (
     level: keyof ApiLogger,
     event: string,
@@ -92,46 +99,26 @@ export function createApp(options: AppOptions = {}): express.Express {
   });
 
   app.get("/models/status", async (_request, response) => {
-    const registeredModels = await getRegisteredModels(options.registryPath);
-    const models: Array<
-      RegisteredModel &
-        ({ command: CommandResult } | { error: { message: string } })
-    > = [];
-    for (const model of registeredModels) {
-      try {
-        const command = await getModelStatus({
-          displayName: model.displayName,
-          registryPath: options.registryPath,
-        });
-        models.push({ ...model, command });
-      } catch (error) {
-        models.push({
-          ...model,
-          error: {
-            message: error instanceof Error ? error.message : String(error),
-          },
-        });
-      }
-    }
+    const models = await getModelStatuses(options.registryPath, runtime);
     response.json({ models });
   });
 
   app.get("/models/running", async (_request, response) => {
-    const models = await getRunningRegisteredModels(options.registryPath);
+    const models = await getRunningRegisteredModels(
+      options.registryPath,
+      runtime,
+    );
     response.json({ models });
   });
 
   app.get("/models/:displayName/status", async (request, response) => {
     const displayName = parseDisplayName(request.params.displayName);
-    const model = await getRegisteredModel(
+    const model = await getRegisteredModelStatus(
       displayName,
       options.registryPath,
+      runtime,
     );
-    const command = await getModelStatus({
-      displayName: model.displayName,
-      registryPath: options.registryPath,
-    });
-    response.json({ model: { ...model, command } });
+    response.json({ model });
   });
 
   app.post(
@@ -188,6 +175,7 @@ export function createApp(options: AppOptions = {}): express.Express {
         registryPath: options.registryPath,
         launchOptionSelections,
         confirmSwitch: async () => switchRunning,
+        runtime,
       });
 
       if (result.outcome === "cancelled") {
@@ -272,8 +260,12 @@ export function createApp(options: AppOptions = {}): express.Express {
       return;
     }
     if (error instanceof UnknownModelError) {
+      // The core message names the registry path, which clients don't need.
       response.status(404).json({
-        error: { code: "MODEL_NOT_FOUND", message: error.message },
+        error: {
+          code: "MODEL_NOT_FOUND",
+          message: `Unknown model ${JSON.stringify(error.displayName)}.`,
+        },
       });
       return;
     }
