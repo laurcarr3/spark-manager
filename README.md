@@ -135,10 +135,13 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:3000/models/deepseek-v4/start
 curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:3000/models/DeepSeek-v4/stop
+curl http://127.0.0.1:3000/operations/op_0123456789abcdef0123456789abcdef
 ```
 
-Model names in URLs must be URL-encoded. Unknown names return `404`
-`MODEL_NOT_FOUND`.
+Model names in URLs must be URL-encoded. Names longer than 256 characters or
+containing control characters return `400` `INVALID_MODEL_NAME`; unknown names
+return `404` `MODEL_NOT_FOUND`. Errors have the shape
+`{ "error": { "code": "...", "message": "...", ...details } }`.
 
 ### Status
 
@@ -151,7 +154,15 @@ when its name is listed in the model's `containerNames`, or when its Compose
 ```jsonc
 {
   "displayName": "qwen3.8-27b",
-  "lifecycleState": "running",   // "running", "stopped", or "unknown"
+  "lifecycleState": "running",   // see below
+  "desiredState": "running",     // last requested: "running", "stopped", or null
+  "activeOperation": null,       // { operationId, kind, status } while one runs
+  "lastOperation": {             // the most recent finished operation, or null
+    "operationId": "op_…",
+    "kind": "start",
+    "status": "succeeded"
+  },
+  "lastError": null,             // the most recent failure (see Operations); a later success keeps it
   "runtime": {
     "observed": true,            // false when Docker could not be queried
     "present": true,             // a container owned by the workspace is running
@@ -174,9 +185,22 @@ when its name is listed in the model's `containerNames`, or when its Compose
 }
 ```
 
+`lifecycleState` is derived in this order:
+
+1. An operation is active for the model: `queued`, then `starting` or
+   `stopping` once it runs.
+2. The model's last operation failed: `failed`. This is not terminal; a new
+   start or stop is allowed.
+3. Docker could not be queried: `unknown`.
+4. A container owned by the workspace is running: `running`; otherwise
+   `stopped`.
+
 `containers` lists running and recently exited containers, newest first. If
-Docker is unavailable the endpoints still return `200`, with
-`lifecycleState: "unknown"`, `observed: false`, and the error message.
+Docker is unavailable the endpoints still return `200`, with `observed: false`
+and the error message.
+
+Operation history, `desiredState`, and `lastError` are held in memory and are
+lost when the API restarts.
 
 **Breaking change:** the status endpoints previously returned the output of
 `./start.sh ps` (`command.stdout`, `command.exitCode`) alongside the registry
@@ -185,14 +209,103 @@ entry. They now return the structure above, without registry fields; use
 
 ### Start and stop
 
-A start request returns `409` when
-another registered model is running unless `switchRunning` is `true`. Mutation
-requests require a JSON content type, which also prevents ordinary cross-origin
-HTML forms from triggering local lifecycle operations.
+`POST /models/:displayName/start` accepts
+`{ "switchRunning"?: boolean, "launchOptionSelections"?: { [optionId]: choiceId } }`.
+`POST /models/:displayName/stop` accepts an empty body or `{}`. Unknown fields
+or wrong types return `400` `INVALID_REQUEST`. Mutation requests require a JSON
+content type (`415` otherwise), which also prevents ordinary cross-origin HTML
+forms from triggering local lifecycle operations.
 
 The optional `launchOptionSelections` object maps registry option IDs to choice
 IDs. Omitted options use their declared defaults; options without a default
-must be selected explicitly.
+must be selected explicitly. Invalid selections return `400`
+`INVALID_LAUNCH_OPTIONS`.
+
+Both endpoints run `./start.sh` or `./stop.sh` in the background and return
+`202` immediately, with a `Location: /operations/:operationId` header:
+
+```json
+{
+  "operationId": "op_…",
+  "kind": "start",
+  "model": "qwen3.8-27b",
+  "desiredState": "running",
+  "lifecycleState": "queued",
+  "operationStatus": "queued",
+  "statusUrl": "/operations/op_…",
+  "modelStatusUrl": "/models/qwen3.8-27b/status"
+}
+```
+
+Poll `statusUrl` and `modelStatusUrl` to follow progress. A start finishes when
+`./start.sh` exits (recipes exit once the model is healthy), so it can take a
+long time; it times out after 3 hours. A stop times out after 5 minutes.
+
+Only one operation runs at a time across all models. A request is refused with:
+
+| Status | Code | When |
+| --- | --- | --- |
+| `409` | `OPERATION_IN_PROGRESS` | This model already has an active operation. Details: `activeOperationId`, `activeModel`. |
+| `409` | `LIFECYCLE_BUSY` | Another model's operation is active. Same details. |
+| `409` | `MODEL_ALREADY_RUNNING` | Another model is running and `switchRunning` is not `true`. Details: `runningModels`. |
+| `409` | `LIFECYCLE_LOCK_HELD` | The CLI is starting a model. |
+| `503` | `RUNTIME_INSPECTION_FAILED` | Docker could not be queried to check for other running models. |
+
+With `switchRunning: true`, the start operation runs each other running model's
+`./stop.sh` before `./start.sh`.
+
+On `SIGINT` or `SIGTERM` the API terminates any running `start.sh` or `stop.sh`
+(and the helpers they started) before exiting. Model containers keep running.
+
+### Operations
+
+`GET /operations/:operationId` returns `{ "operation": {...} }`. IDs not
+matching `op_` plus 32 lowercase hex characters return `400`
+`INVALID_OPERATION_ID`; unknown IDs return `404` `OPERATION_NOT_FOUND`. The
+last 10 operations per model are kept.
+
+```jsonc
+{
+  "operationId": "op_…",
+  "kind": "start",               // or "stop"
+  "displayName": "qwen3.8-27b",
+  "status": "failed",            // "queued", "running", "succeeded", or "failed"
+  "requestId": "…",              // the x-request-id of the request that created it
+  "options": { "switchRunning": false, "launchOptionSelections": { "context-profile": "compact" } },
+  "createdAt": "…",
+  "startedAt": "…",
+  "finishedAt": "…",
+  "command": { "exitCode": 3, "signal": null },   // null if no script ran
+  "error": {                     // null unless failed
+    "operationId": "op_…",
+    "kind": "start",
+    "code": "START_COMMAND_FAILED",
+    "message": "The start command exited with status 3.",
+    "at": "…",
+    "exitCode": 3,
+    "signal": null,
+    "retrySafe": false,          // true when nothing was left half-running
+    "logTail": []
+  }
+}
+```
+
+Operation error codes:
+
+| Code | Meaning |
+| --- | --- |
+| `CONFLICTING_MODEL_STOP_FAILED` | `switchRunning` could not stop the other model; the requested model was not started. |
+| `START_COMMAND_UNAVAILABLE` | `start.sh` is missing or not executable, or the workspace is invalid. |
+| `START_COMMAND_FAILED` | `start.sh` exited non-zero or was killed by a signal. |
+| `STARTUP_TIMEOUT` | `start.sh` did not finish in time and was terminated. |
+| `STOP_COMMAND_UNAVAILABLE` | The model has no `stop.sh`. |
+| `STOP_COMMAND_FAILED` | `stop.sh` exited non-zero or was killed by a signal. |
+| `STOP_TIMEOUT` | `stop.sh` did not finish in time and was terminated. |
+| `INTERNAL_ERROR` | An unexpected error. |
+
+**Breaking change:** start and stop previously waited for the recipe script and
+returned `200` (or `502` `COMMAND_FAILED` with the command output). They now
+return `202` with an operation, and there is no synchronous mode.
 
 Set `SPARK_MANAGER_API_PORT` to choose another port. For an additional local
 authentication layer, set `SPARK_MANAGER_API_TOKEN`; all requests must then send

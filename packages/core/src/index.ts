@@ -21,6 +21,20 @@ export {
   type RuntimeWorkspace,
 } from "./runtime.js";
 export { defaultRegistryPath } from "./workspace.js";
+export {
+  LifecycleManager,
+  LifecycleRequestError,
+  OPERATION_ID_PATTERN,
+  type LifecycleError,
+  type LifecycleErrorCode,
+  type LifecycleManagerOptions,
+  type LifecycleTiming,
+  type ManagedModelStatus,
+  type Operation,
+  type OperationKind,
+  type OperationStatus,
+  type OperationSummary,
+} from "./lifecycle.js";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -104,7 +118,15 @@ export class UnknownModelError extends Error {
   }
 }
 
-export type LifecycleState = "stopped" | "running" | "unknown";
+/** Layer 1 status reports only "stopped", "running" or "unknown"; the lifecycle manager adds the rest. */
+export type LifecycleState =
+  | "stopped"
+  | "queued"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "failed"
+  | "unknown";
 
 export interface RuntimeObservation {
   /** False when Docker could not be queried. */
@@ -718,8 +740,18 @@ function invalidLaunchOptions(
   );
 }
 
-async function acquireLifecycleLock(
-  registryPath: string,
+export class LifecycleLockHeldError extends Error {
+  constructor(readonly ownerPid: number) {
+    super(
+      `Another spark-manager lifecycle operation is already running (PID ${ownerPid}).`,
+    );
+    this.name = "LifecycleLockHeldError";
+  }
+}
+
+/** Takes the cross-process lifecycle lock shared by the CLI and API; resolves to its release function. */
+export async function acquireLifecycleLock(
+  registryPath = defaultRegistryPath(),
 ): Promise<() => Promise<void>> {
   const managerDirectory = dirname(registryPath);
   const lockDirectory = join(managerDirectory, "lifecycle.lock");
@@ -744,9 +776,7 @@ async function acquireLifecycleLock(
 
       const ownerPid = await readLockOwner(join(lockDirectory, "pid"));
       if (ownerPid !== undefined && processIsRunning(ownerPid)) {
-        throw new Error(
-          `Another spark-manager start operation is already running (PID ${ownerPid}).`,
-        );
+        throw new LifecycleLockHeldError(ownerPid);
       }
       if (ownerPid === undefined) {
         throw new Error(

@@ -2,15 +2,14 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   DockerRuntimeController,
-  getModelStatuses,
-  getRegisteredModel,
   getRegisteredModels,
-  getRegisteredModelStatus,
   getRunningRegisteredModels,
-  startRegisteredModel,
-  stopModel,
+  LifecycleManager,
+  LifecycleRequestError,
+  OPERATION_ID_PATTERN,
   UnknownModelError,
-  type CommandResult,
+  type LifecycleTiming,
+  type Operation,
   type RuntimeController,
 } from "@spark-manager/core";
 import express, {
@@ -25,6 +24,8 @@ export interface AppOptions {
   lifecycle?: {
     /** Test-only: a fake runtime used instead of querying Docker. Leave unset in production. */
     runtime?: RuntimeController;
+    /** Test-only: shorter timeouts. */
+    timing?: Partial<LifecycleTiming>;
   };
 }
 
@@ -51,6 +52,23 @@ export function createApp(options: AppOptions = {}): express.Express {
   ): void => {
     logger?.[level](JSON.stringify({ service: "spark-manager-api", event, ...fields }));
   };
+  const lifecycle = new LifecycleManager({
+    registryPath: options.registryPath,
+    runtime,
+    timing: options.lifecycle?.timing,
+    onOperationFinished: (operation) => {
+      log(operation.status === "failed" ? "warn" : "info", `model.${operation.kind}.finished`, {
+        requestId: operation.requestId,
+        operationId: operation.operationId,
+        displayName: operation.displayName,
+        status: operation.status,
+        errorCode: operation.error?.code ?? null,
+        exitCode: operation.command?.exitCode ?? null,
+        signal: operation.command?.signal ?? null,
+      });
+    },
+  });
+  app.locals.lifecycle = lifecycle;
   app.disable("x-powered-by");
 
   app.use((request, response, next) => {
@@ -99,7 +117,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   });
 
   app.get("/models/status", async (_request, response) => {
-    const models = await getModelStatuses(options.registryPath, runtime);
+    const models = await lifecycle.getStatuses();
     response.json({ models });
   });
 
@@ -113,11 +131,7 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   app.get("/models/:displayName/status", async (request, response) => {
     const displayName = parseDisplayName(request.params.displayName);
-    const model = await getRegisteredModelStatus(
-      displayName,
-      options.registryPath,
-      runtime,
-    );
+    const model = await lifecycle.getStatus(displayName);
     response.json({ model });
   });
 
@@ -126,30 +140,10 @@ export function createApp(options: AppOptions = {}): express.Express {
     requireJsonRequest,
     async (request, response) => {
       const displayName = parseDisplayName(request.params.displayName);
-      const bodyValue: unknown = request.body;
-      if (
-        typeof bodyValue !== "object" ||
-        bodyValue === null ||
-        Array.isArray(bodyValue)
-      ) {
-        throw new HttpError(
-          400,
-          "INVALID_REQUEST",
-          "Request body must be a JSON object.",
-        );
-      }
-      const body = bodyValue as Record<string, unknown>;
-      const unexpectedKeys = Object.keys(body).filter(
-        (key) =>
-          key !== "switchRunning" && key !== "launchOptionSelections",
-      );
-      if (unexpectedKeys.length > 0) {
-        throw new HttpError(
-          400,
-          "INVALID_REQUEST",
-          `Unexpected request field: ${unexpectedKeys[0]}.`,
-        );
-      }
+      const body = parseBody(request.body, [
+        "switchRunning",
+        "launchOptionSelections",
+      ]);
       if (
         body.switchRunning !== undefined &&
         typeof body.switchRunning !== "boolean"
@@ -164,49 +158,22 @@ export function createApp(options: AppOptions = {}): express.Express {
       const launchOptionSelections = parseLaunchOptionSelections(
         body.launchOptionSelections,
       );
+      const requestId = requestLogContexts.get(request)?.requestId ?? null;
+      const operation = await lifecycle.start(
+        displayName,
+        {
+          switchRunning,
+          ...(launchOptionSelections ? { launchOptionSelections } : {}),
+        },
+        requestId,
+      );
       log("info", "model.start.requested", {
-        requestId: requestLogContexts.get(request)?.requestId,
+        requestId,
+        operationId: operation.operationId,
         displayName,
         switchRunning,
-        launchOptionSelections: launchOptionSelections ?? {},
       });
-      const result = await startRegisteredModel({
-        displayName,
-        registryPath: options.registryPath,
-        launchOptionSelections,
-        confirmSwitch: async () => switchRunning,
-        runtime,
-      });
-
-      if (result.outcome === "cancelled") {
-        response.status(409).json({
-          error: {
-            code: "MODEL_ALREADY_RUNNING",
-            message:
-              "Another registered model is running. Retry with switchRunning set to true to stop it first.",
-            runningModels: result.runningModels,
-          },
-        });
-        return;
-      }
-      if (result.outcome === "stop-failed") {
-        sendCommandFailure(
-          response,
-          `Unable to stop ${JSON.stringify(result.model.displayName)} before starting the requested model.`,
-          result.result,
-        );
-        return;
-      }
-      if (commandFailed(result.result)) {
-        sendCommandFailure(response, "The model start command failed.", result.result);
-        return;
-      }
-
-      response.json({
-        model: { displayName },
-        stoppedModels: result.stoppedModels,
-        command: result.result,
-      });
+      sendAccepted(response, operation);
     },
   );
 
@@ -215,25 +182,38 @@ export function createApp(options: AppOptions = {}): express.Express {
     requireJsonRequest,
     async (request, response) => {
       const displayName = parseDisplayName(request.params.displayName);
+      // express.json leaves the body undefined when the request has none.
+      parseBody(request.body ?? {}, []);
+      const requestId = requestLogContexts.get(request)?.requestId ?? null;
+      const operation = await lifecycle.stop(displayName, requestId);
       log("info", "model.stop.requested", {
-        requestId: requestLogContexts.get(request)?.requestId,
+        requestId,
+        operationId: operation.operationId,
         displayName,
       });
-      const model = await getRegisteredModel(
-        displayName,
-        options.registryPath,
-      );
-      const command = await stopModel({
-        displayName: model.displayName,
-        registryPath: options.registryPath,
-      });
-      if (commandFailed(command)) {
-        sendCommandFailure(response, "The model stop command failed.", command);
-        return;
-      }
-      response.json({ model, command });
+      sendAccepted(response, operation);
     },
   );
+
+  app.get("/operations/:operationId", (request, response) => {
+    const { operationId } = request.params;
+    if (!OPERATION_ID_PATTERN.test(operationId)) {
+      throw new HttpError(
+        400,
+        "INVALID_OPERATION_ID",
+        "Operation IDs look like op_ followed by 32 lowercase hex characters.",
+      );
+    }
+    const operation = lifecycle.getOperation(operationId);
+    if (!operation) {
+      throw new HttpError(
+        404,
+        "OPERATION_NOT_FOUND",
+        `Unknown operation ${JSON.stringify(operationId)}.`,
+      );
+    }
+    response.json({ operation });
+  });
 
   app.use((_request, response) => {
     response.status(404).json({
@@ -244,7 +224,10 @@ export function createApp(options: AppOptions = {}): express.Express {
   const errorHandler: ErrorRequestHandler = (error, request, response, _next) => {
     const context = requestLogContexts.get(request);
     if (context) {
-      log(error instanceof HttpError || error instanceof UnknownModelError || isBodyParserError(error)
+      log(error instanceof HttpError ||
+        error instanceof LifecycleRequestError ||
+        error instanceof UnknownModelError ||
+        isBodyParserError(error)
         ? "warn"
         : "error", "request.failed", {
         requestId: context.requestId,
@@ -256,6 +239,12 @@ export function createApp(options: AppOptions = {}): express.Express {
     if (error instanceof HttpError) {
       response.status(error.status).json({
         error: { code: error.code, message: error.message },
+      });
+      return;
+    }
+    if (error instanceof LifecycleRequestError) {
+      response.status(error.status).json({
+        error: { code: error.code, message: error.message, ...error.details },
       });
       return;
     }
@@ -374,11 +363,57 @@ function parseDisplayName(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new HttpError(
       400,
-      "INVALID_REQUEST",
+      "INVALID_MODEL_NAME",
       "Model display name must not be empty.",
     );
   }
+  // Checked before the registry lookup so oversized or control-character names never reach logs or messages.
+  if (value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new HttpError(
+      400,
+      "INVALID_MODEL_NAME",
+      "Model display name must be at most 256 characters with no control characters.",
+    );
+  }
   return value;
+}
+
+function parseBody(
+  value: unknown,
+  allowedKeys: readonly string[],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(
+      400,
+      "INVALID_REQUEST",
+      "Request body must be a JSON object.",
+    );
+  }
+  const unexpectedKey = Object.keys(value).find(
+    (key) => !allowedKeys.includes(key),
+  );
+  if (unexpectedKey !== undefined) {
+    throw new HttpError(
+      400,
+      "INVALID_REQUEST",
+      `Unexpected request field: ${unexpectedKey}.`,
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
+function sendAccepted(response: express.Response, operation: Operation): void {
+  const statusUrl = `/operations/${operation.operationId}`;
+  response.status(202).location(statusUrl).json({
+    operationId: operation.operationId,
+    kind: operation.kind,
+    model: operation.displayName,
+    desiredState: operation.kind === "start" ? "running" : "stopped",
+    lifecycleState: "queued",
+    operationStatus: operation.status,
+    statusUrl,
+    modelStatusUrl: `/models/${encodeURIComponent(operation.displayName)}/status`,
+  });
 }
 
 function parseLaunchOptionSelections(
@@ -406,20 +441,6 @@ function parseLaunchOptionSelections(
     selections[optionId] = choiceId;
   }
   return selections;
-}
-
-function commandFailed(result: CommandResult): boolean {
-  return result.exitCode !== 0 || result.signal !== null;
-}
-
-function sendCommandFailure(
-  response: express.Response,
-  message: string,
-  command: CommandResult,
-): void {
-  response.status(502).json({
-    error: { code: "COMMAND_FAILED", message, command },
-  });
 }
 
 function isBodyParserError(

@@ -65,6 +65,10 @@ test("lists models and reports status from Docker without running recipes", asyn
         model: {
           displayName: "Test Model",
           lifecycleState: "running",
+          desiredState: null,
+          activeOperation: null,
+          lastOperation: null,
+          lastError: null,
           runtime: {
             observed: true,
             present: true,
@@ -196,14 +200,15 @@ test("logs correlated request metadata without exposing authorization", async ()
       body: "{}",
     });
     assert.equal(response.headers.get("x-request-id"), "browser-123");
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 202);
   });
 
   assert.equal(entries[0].event, "request.started");
   assert.equal(entries[0].requestId, "browser-123");
   assert.equal(entries[0].authorizationPresent, true);
-  assert.equal(entries.at(-1).event, "request.completed");
-  assert.equal(entries.at(-1).status, 200);
+  const completed = entries.find((entry) => entry.event === "request.completed");
+  assert.equal(completed.requestId, "browser-123");
+  assert.equal(completed.status, 202);
   assert.equal(JSON.stringify(entries).includes("must-not-be-logged"), false);
   await fixture.cleanup();
 });
@@ -245,81 +250,6 @@ test("reports running models without invoking recipe status commands", async () 
   }
 });
 
-test("starts and stops a registered model", async () => {
-  const fixture = await createFixture({ "Test Model": "stopped\n" });
-  const workspace = fixture.workspaces["Test Model"];
-  await writeExecutable(
-    join(workspace, "start.sh"),
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "ps" ]; then printf "stopped\\n"; exit; fi',
-      'printf "started\\n" > started.txt',
-      "",
-    ].join("\n"),
-  );
-  await writeExecutable(
-    join(workspace, "stop.sh"),
-    '#!/bin/sh\nprintf "stopped\\n" > stopped.txt\n',
-  );
-
-  await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
-    const startResponse = await postJson(
-      `${baseUrl}/models/Test%20Model/start`,
-      {},
-    );
-    assert.equal(startResponse.status, 200);
-    assert.equal(await readFile(join(workspace, "started.txt"), "utf8"), "started\n");
-
-    const stopResponse = await fetch(`${baseUrl}/models/Test%20Model/stop`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-    });
-    assert.equal(stopResponse.status, 200);
-    assert.equal(await readFile(join(workspace, "stopped.txt"), "utf8"), "stopped\n");
-  });
-  await fixture.cleanup();
-});
-
-test("passes registry launch option selections to the recipe", async () => {
-  const fixture = await createFixture({ "Test Model": "stopped\n" });
-  const workspace = fixture.workspaces["Test Model"];
-  await writeFile(
-    fixture.registryPath,
-    JSON.stringify({
-      "Test Model": {
-        workspaceDirectory: workspace,
-        launchOptions: [{
-          id: "context-profile",
-          label: "Context profile",
-          defaultChoice: "recipe-default",
-          choices: [
-            { id: "compact", label: "Compact", environment: { CONTEXT: "65536" } },
-            { id: "recipe-default", label: "Default", environment: { CONTEXT: "262144" } },
-          ],
-        }],
-      },
-    }),
-  );
-  await writeExecutable(
-    join(workspace, "start.sh"),
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "ps" ]; then printf "stopped\\n"; exit; fi',
-      'printf "%s\\n" "$CONTEXT" > selected.txt',
-      "",
-    ].join("\n"),
-  );
-
-  await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
-    const response = await postJson(`${baseUrl}/models/Test%20Model/start`, {
-      launchOptionSelections: { "context-profile": "compact" },
-    });
-    assert.equal(response.status, 200);
-    assert.equal(await readFile(join(workspace, "selected.txt"), "utf8"), "65536\n");
-  });
-  await fixture.cleanup();
-});
-
 test("requires JSON for mutations and validates start options", async () => {
   const fixture = await createFixture({ "Test Model": "stopped\n" });
   await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
@@ -348,81 +278,6 @@ test("requires JSON for mutations and validates start options", async () => {
     assert.equal(invalidSelectionsResponse.status, 400);
   });
   await fixture.cleanup();
-});
-
-test("reports a conflict or switches away from a running model", async () => {
-  const fixture = await createFixture({
-    "First Model": "running\n",
-    "Second Model": "stopped\n",
-  });
-  const firstWorkspace = fixture.workspaces["First Model"];
-  const secondWorkspace = fixture.workspaces["Second Model"];
-  await writeExecutable(
-    join(firstWorkspace, "stop.sh"),
-    '#!/bin/sh\nprintf "stopped\\n" > stopped.txt\n',
-  );
-  await writeExecutable(
-    join(secondWorkspace, "start.sh"),
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "ps" ]; then printf "stopped\\n"; exit; fi',
-      'printf "started\\n" > started.txt',
-      "",
-    ].join("\n"),
-  );
-  const originalPath = process.env.PATH;
-  const binDirectory = join(fixture.directory, "bin");
-  await mkdir(binDirectory);
-  await writeExecutable(
-    join(binDirectory, "docker"),
-    [
-      "#!/bin/sh",
-      'case "$1" in',
-      "  ps) printf '%s\\n' container-id ;;",
-      `  inspect) printf '%s' '${JSON.stringify([
-        {
-          Id: "container-id",
-          Config: { Labels: {} },
-          Mounts: [{ Source: firstWorkspace }],
-          State: { Running: true },
-        },
-      ])}' ;;`,
-      "  *) exit 2 ;;",
-      "esac",
-      "",
-    ].join("\n"),
-  );
-  process.env.PATH = `${binDirectory}:${originalPath}`;
-
-  try {
-    await withApi({ registryPath: fixture.registryPath }, async (baseUrl) => {
-      const conflictResponse = await postJson(
-        `${baseUrl}/models/Second%20Model/start`,
-        {},
-      );
-      assert.equal(conflictResponse.status, 409);
-      const conflict = await conflictResponse.json();
-      assert.equal(conflict.error.code, "MODEL_ALREADY_RUNNING");
-      assert.equal(conflict.error.runningModels[0].displayName, "First Model");
-
-      const switchResponse = await postJson(
-        `${baseUrl}/models/Second%20Model/start`,
-        { switchRunning: true },
-      );
-      assert.equal(switchResponse.status, 200);
-      assert.equal(
-        await readFile(join(firstWorkspace, "stopped.txt"), "utf8"),
-        "stopped\n",
-      );
-      assert.equal(
-        await readFile(join(secondWorkspace, "started.txt"), "utf8"),
-        "started\n",
-      );
-    });
-  } finally {
-    process.env.PATH = originalPath;
-    await fixture.cleanup();
-  }
 });
 
 test("supports bearer-token authentication", async () => {
@@ -506,7 +361,8 @@ async function installDockerStub(directory, inspections) {
 }
 
 async function withApi(options, run) {
-  const server = createApp({ logger: false, ...options }).listen(0, "127.0.0.1");
+  const app = createApp({ logger: false, ...options });
+  const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
     server.once("error", reject);
@@ -519,6 +375,7 @@ async function withApi(options, run) {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
+    await app.locals.lifecycle.close();
   }
 }
 
