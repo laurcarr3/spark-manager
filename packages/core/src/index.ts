@@ -30,11 +30,20 @@ export {
   type LifecycleManagerOptions,
   type LifecycleTiming,
   type ManagedModelStatus,
+  type ModelLogs,
   type Operation,
   type OperationKind,
   type OperationStatus,
   type OperationSummary,
 } from "./lifecycle.js";
+export { type LogLine, type LogStream } from "./operation-log.js";
+export {
+  isSecretName,
+  maskSecretEnvironment,
+  REDACTED,
+  Redactor,
+  sanitizeLogText,
+} from "./redaction.js";
 
 export type ModelStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -151,7 +160,7 @@ export async function startRegisteredModel(
 ): Promise<StartRegisteredModelResult> {
   const registryPath = options.registryPath ?? defaultRegistryPath();
   const model = await getRegisteredModel(options.displayName, registryPath);
-  const launchEnvironment = resolveLaunchEnvironment(
+  const launchEnvVariables = resolveLaunchEnvVariables(
     model,
     options.launchOptionSelections,
   );
@@ -193,7 +202,7 @@ export async function startRegisteredModel(
     const result = await startModel({
       displayName: options.displayName,
       command: options.command,
-      environment: launchEnvironment,
+      environment: launchEnvVariables,
       registryPath,
       onStdout: options.onStdout,
       onStderr: options.onStderr,
@@ -438,7 +447,7 @@ function parseContainerNames(
   return value;
 }
 
-export function resolveLaunchEnvironment(
+export function resolveLaunchEnvVariables(
   model: RegisteredModel,
   selections: Readonly<Record<string, string>> = {},
 ): Record<string, string> {

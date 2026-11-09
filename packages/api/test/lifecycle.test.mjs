@@ -86,7 +86,11 @@ test("a failing start records START_COMMAND_FAILED and the model's lastError", a
       assert.equal(operation.error.exitCode, 3);
       assert.equal(operation.error.signal, null);
       assert.equal(operation.error.retrySafe, false);
-      assert.deepEqual(operation.error.logTail, []);
+      assert.deepEqual(operation.error.logTail, [
+        'Running ./start.sh for "Test Model".',
+        "./start.sh exited with status 3.",
+        "Start failed (START_COMMAND_FAILED): The start command exited with status 3.",
+      ]);
 
       const { body } = await getJson(modelUrl(baseUrl, "Test Model", "status"));
       assert.equal(body.model.lifecycleState, "failed");
@@ -461,6 +465,7 @@ test("every lifecycle route requires the bearer token", async () => {
         () => postJson(modelUrl(baseUrl, "Test Model", "start"), {}),
         () => postJson(modelUrl(baseUrl, "Test Model", "stop"), {}),
         () => fetch(`${baseUrl}/operations/op_${"0".repeat(32)}`),
+        () => fetch(modelUrl(baseUrl, "Test Model", "logs")),
       ];
       for (const send of requests) {
         assert.equal((await send()).status, 401);

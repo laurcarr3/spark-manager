@@ -136,7 +136,13 @@ curl -X POST -H 'Content-Type: application/json' \
 curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:3000/models/DeepSeek-v4/stop
 curl http://127.0.0.1:3000/operations/op_0123456789abcdef0123456789abcdef
+curl 'http://127.0.0.1:3000/models/DeepSeek-v4/logs?after=0&limit=200'
 ```
+
+`GET /models` and `GET /models/running` return the registry entries, with the
+values of secret-named launch option environment variables (names containing
+`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `CREDENTIAL` and similar) replaced by
+`[REDACTED]`.
 
 Model names in URLs must be URL-encoded. Names longer than 256 characters or
 containing control characters return `400` `INVALID_MODEL_NAME`; unknown names
@@ -199,8 +205,8 @@ when its name is listed in the model's `containerNames`, or when its Compose
 Docker is unavailable the endpoints still return `200`, with `observed: false`
 and the error message.
 
-Operation history, `desiredState`, and `lastError` are held in memory and are
-lost when the API restarts.
+Operation history, logs, `desiredState`, and `lastError` are held in memory and
+are lost when the API restarts.
 
 **Breaking change:** the status endpoints previously returned the output of
 `./start.sh ps` (`command.stdout`, `command.exitCode`) alongside the registry
@@ -285,7 +291,7 @@ last 10 operations per model are kept.
     "exitCode": 3,
     "signal": null,
     "retrySafe": false,          // true when nothing was left half-running
-    "logTail": []
+    "logTail": ["…", "Start failed (START_COMMAND_FAILED): …"]   // last 50 log lines (see Logs)
   }
 }
 ```
@@ -306,6 +312,46 @@ Operation error codes:
 **Breaking change:** start and stop previously waited for the recipe script and
 returned `200` (or `502` `COMMAND_FAILED` with the command output). They now
 return `202` with an operation, and there is no synchronous mode.
+
+### Logs
+
+`GET /models/:displayName/logs?after=<seq>&limit=<n>` returns the output of the
+model's latest operation: what `./start.sh` and `./stop.sh` printed, plus the
+manager's own lines (`stream: "manager"`). A start with `switchRunning` includes
+the conflicting model's `./stop.sh` output in the starting model's log.
+
+```jsonc
+{
+  "displayName": "qwen3.8-27b",
+  "operationId": "op_…",         // null if the model has had no operation since the API started
+  "operationKind": "start",
+  "operationStatus": "running",
+  "lines": [
+    { "seq": 41, "at": "…", "stream": "stdout", "text": "…" }   // stream: "stdout", "stderr" or "manager"
+  ],
+  "nextAfter": 41,               // pass back as ?after= to get only newer lines
+  "truncated": false,            // true if lines of this operation after `after` were already dropped
+  "hasMore": false               // true if more lines are available after this page
+}
+```
+
+- `after` is an optional non-negative integer (default `0`); lines with a
+  greater `seq` are returned. `limit` is an integer from 1 to 1000 (default
+  `200`). Other, repeated or empty query parameters return `400`
+  `INVALID_LOG_QUERY`.
+- `seq` keeps increasing across a model's operations, so a client polling with
+  its last `nextAfter` simply receives the next operation's lines; watch
+  `operationId` to notice the switch. An `after` beyond any issued `seq` (for
+  example, from before an API restart) is treated as `0`.
+- Each model keeps only its latest operation's log, capped at 2,000 lines (the
+  oldest are dropped). Carriage returns count as line breaks, so progress bars
+  produce one line per update. Each line is capped at 4,096 characters.
+- Terminal control sequences are removed, and secrets are redacted before a
+  line is stored: values of secret-named environment variables (from the API's
+  environment and the selected launch options, if at least 6 characters long),
+  the API bearer token, `Authorization` and `Bearer` credentials, credentials in
+  URLs, `--api-key`-style flags and `api_key=`-style assignments, and common
+  token shapes (`hf_…`, `sk-…`, `ghp_…`, AWS keys, JWTs).
 
 Set `SPARK_MANAGER_API_PORT` to choose another port. For an additional local
 authentication layer, set `SPARK_MANAGER_API_TOKEN`; all requests must then send

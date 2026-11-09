@@ -9,7 +9,7 @@ import {
   getModelStatuses,
   getRegisteredModel,
   getRegisteredModelStatus,
-  resolveLaunchEnvironment,
+  resolveLaunchEnvVariables,
 } from "../dist/index.js";
 
 test("getModelStatuses derives state from the runtime without running recipes", async () => {
@@ -311,11 +311,11 @@ test("registry launch options resolve defaults and explicit selections", async (
     });
     const model = await getRegisteredModel("Test Model", registryPath);
 
-    assert.deepEqual(resolveLaunchEnvironment(model), {
+    assert.deepEqual(resolveLaunchEnvVariables(model), {
       MAX_MODEL_LEN: "131072",
       CACHE_PROFILE: "balanced",
     });
-    assert.deepEqual(resolveLaunchEnvironment(model, { context: "compact" }), {
+    assert.deepEqual(resolveLaunchEnvVariables(model, { context: "compact" }), {
       MAX_MODEL_LEN: "65536",
       CACHE_PROFILE: "compact",
     });

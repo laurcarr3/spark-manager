@@ -45,7 +45,7 @@ scale.
 
 - The registry is `~/.spark-manager/registry.json` (`defaultRegistryPath()`).
   It maps a display name to `{ workspaceDirectory, launchOptions? }`.
-- Launch options are validated, and `resolveLaunchEnvironment(model,
+- Launch options are validated, and `resolveLaunchEnvVariables(model,
   selections)` turns the selections into environment variables.
 - `startModel`, `stopModel` and `getModelStatus` run `./start.sh`, `./stop.sh`
   and `./start.sh ps` in the workspace and wait for them to finish
@@ -300,7 +300,7 @@ Keep a bounded map of operations: the last 10 per model, pruning older ones.
 **Admission** (synchronous checks before the 202):
 
 1. The model exists in the registry (404 `MODEL_NOT_FOUND`).
-2. Launch option selections are valid: call `resolveLaunchEnvironment` now and
+2. Launch option selections are valid: call `resolveLaunchEnvVariables` now and
    return 400 `INVALID_LAUNCH_OPTIONS`.
 3. No operation is active: otherwise return 409 `LIFECYCLE_BUSY` with
    `activeOperationId` and its model. If it is the same model, use
@@ -324,7 +324,7 @@ POSTs cannot both pass check 3.
    `./stop.sh`. On failure, fail with `CONFLICTING_MODEL_STOP_FAILED`, naming
    the model.
 2. Run `./start.sh` with `launchProcess` (Appendix C) using
-   `{ ...process.env, ...launchEnvironment }`, with cwd set to the resolved
+   `{ ...process.env, ...launchEnvVariables }`, with cwd set to the resolved
    workspace.
 3. Exit 0: the operation succeeds. Non-zero exit or signal:
    `START_COMMAND_FAILED`. Spawn error (for example, no `start.sh`):
@@ -424,7 +424,7 @@ memory bounded.
 1. Add `redaction.ts` (Appendix D) unchanged: `Redactor`, `sanitizeLogText`,
    `isSecretName`, `maskSecretEnvironment`.
 2. Build a redactor for each operation:
-   `Redactor.fromEnvironment(process.env, launchEnvironment).with([apiToken])`.
+   `Redactor.fromEnvironment(process.env, launchEnvVariables).with([apiToken])`.
    It removes literal values of secret-named environment variables, the API
    bearer token and common token shapes.
 3. Keep one in-memory log per model, holding the **latest operation's**

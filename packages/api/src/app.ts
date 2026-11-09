@@ -6,10 +6,12 @@ import {
   getRunningRegisteredModels,
   LifecycleManager,
   LifecycleRequestError,
+  maskSecretEnvironment,
   OPERATION_ID_PATTERN,
   UnknownModelError,
   type LifecycleTiming,
   type Operation,
+  type RegisteredModel,
   type RuntimeController,
 } from "@spark-manager/core";
 import express, {
@@ -56,6 +58,7 @@ export function createApp(options: AppOptions = {}): express.Express {
     registryPath: options.registryPath,
     runtime,
     timing: options.lifecycle?.timing,
+    secrets: options.token ? [options.token] : [],
     onOperationFinished: (operation) => {
       log(operation.status === "failed" ? "warn" : "info", `model.${operation.kind}.finished`, {
         requestId: operation.requestId,
@@ -113,7 +116,7 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   app.get("/models", async (_request, response) => {
     const models = await getRegisteredModels(options.registryPath);
-    response.json({ models });
+    response.json({ models: models.map(maskModel) });
   });
 
   app.get("/models/status", async (_request, response) => {
@@ -126,13 +129,19 @@ export function createApp(options: AppOptions = {}): express.Express {
       options.registryPath,
       runtime,
     );
-    response.json({ models });
+    response.json({ models: models.map(maskModel) });
   });
 
   app.get("/models/:displayName/status", async (request, response) => {
     const displayName = parseDisplayName(request.params.displayName);
     const model = await lifecycle.getStatus(displayName);
     response.json({ model });
+  });
+
+  app.get("/models/:displayName/logs", async (request, response) => {
+    const displayName = parseDisplayName(request.params.displayName);
+    const query = parseLogQuery(request.query);
+    response.json(await lifecycle.getLogs(displayName, query));
   });
 
   app.post(
@@ -414,6 +423,44 @@ function sendAccepted(response: express.Response, operation: Operation): void {
     statusUrl,
     modelStatusUrl: `/models/${encodeURIComponent(operation.displayName)}/status`,
   });
+}
+
+/** Hides values of secret-named variables in launch option environments. */
+function maskModel(model: RegisteredModel): RegisteredModel {
+  if (!model.launchOptions) {
+    return model;
+  }
+  return {
+    ...model,
+    launchOptions: model.launchOptions.map((option) => ({
+      ...option,
+      choices: option.choices.map((choice) => ({
+        ...choice,
+        environment: maskSecretEnvironment(choice.environment),
+      })),
+    })),
+  };
+}
+
+function parseLogQuery(query: Record<string, unknown>): { after: number; limit: number } {
+  const bounds = { after: [0, Number.MAX_SAFE_INTEGER], limit: [1, 1000] } as const;
+  const result = { after: 0, limit: 200 };
+  for (const [name, value] of Object.entries(query)) {
+    if (name !== "after" && name !== "limit") {
+      throw new HttpError(400, "INVALID_LOG_QUERY", `Unexpected query parameter ${JSON.stringify(name)}.`);
+    }
+    const [min, max] = bounds[name];
+    const number = typeof value === "string" && /^\d{1,16}$/.test(value) ? Number(value) : NaN;
+    if (!(number >= min && number <= max)) {
+      throw new HttpError(
+        400,
+        "INVALID_LOG_QUERY",
+        `${name} must be a single integer from ${min} to ${max === Number.MAX_SAFE_INTEGER ? "2^53 - 1" : max}.`,
+      );
+    }
+    result[name] = number;
+  }
+  return result;
 }
 
 function parseLaunchOptionSelections(

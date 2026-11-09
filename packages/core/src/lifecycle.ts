@@ -7,12 +7,14 @@ import {
   getRegisteredModels,
   getRegisteredModelStatus,
   LifecycleLockHeldError,
-  resolveLaunchEnvironment,
+  resolveLaunchEnvVariables,
   type LifecycleState,
   type RegisteredModel,
   type RegisteredModelStatus,
 } from "./index.js";
+import { OperationLog, type LogLine } from "./operation-log.js";
 import { launchProcess, type LaunchedProcess, type ProcessExit } from "./process.js";
+import { Redactor } from "./redaction.js";
 import { DockerRuntimeController, type RuntimeController } from "./runtime.js";
 import { defaultRegistryPath, errorMessage, resolveWorkspace } from "./workspace.js";
 
@@ -39,7 +41,7 @@ export interface LifecycleError {
   signal: string | null;
   /** True when nothing is left half-running, so the same request can simply be retried. */
   retrySafe: boolean;
-  /** Filled in by Layer 3; always empty until then. */
+  /** The last lines of the operation's log, redacted. */
   logTail: string[];
 }
 
@@ -79,6 +81,18 @@ export interface ManagedModelStatus {
   runtime: RegisteredModelStatus["runtime"];
 }
 
+export interface ModelLogs {
+  displayName: string;
+  /** Null when the model has had no operation since the manager started. */
+  operationId: string | null;
+  operationKind: OperationKind | null;
+  operationStatus: OperationStatus | null;
+  lines: LogLine[];
+  nextAfter: number;
+  truncated: boolean;
+  hasMore: boolean;
+}
+
 export interface LifecycleTiming {
   startTimeoutMs: number;
   stopTimeoutMs: number;
@@ -90,6 +104,8 @@ export interface LifecycleManagerOptions {
   registryPath?: string;
   runtime?: RuntimeController;
   timing?: Partial<LifecycleTiming>;
+  /** Literal values, such as the API bearer token, to redact from logs in addition to secret-named environment variables. */
+  secrets?: readonly string[];
   /** Called once per operation when it succeeds or fails. */
   onOperationFinished?: (operation: Operation) => void;
 }
@@ -102,6 +118,7 @@ const DEFAULT_TIMING: LifecycleTiming = {
   killGraceMs: 10_000,
 };
 const OPERATIONS_KEPT_PER_MODEL = 10;
+const LOG_TAIL_LINES = 50;
 
 /** A request the manager refuses before creating an operation; the API maps it to an HTTP error. */
 export class LifecycleRequestError extends Error {
@@ -123,6 +140,8 @@ interface ModelRecord {
   lastError: LifecycleError | null;
   /** Oldest first; pruned to OPERATIONS_KEPT_PER_MODEL. */
   operationIds: string[];
+  /** The latest operation's output. */
+  log: OperationLog | null;
 }
 
 interface Failure {
@@ -144,6 +163,7 @@ export class LifecycleManager {
   readonly #registryPath: string;
   readonly #runtime: RuntimeController;
   readonly #timing: LifecycleTiming;
+  readonly #secrets: readonly string[];
   readonly #onOperationFinished: ((operation: Operation) => void) | undefined;
   readonly #operations = new Map<string, Operation>();
   readonly #models = new Map<string, ModelRecord>();
@@ -156,6 +176,7 @@ export class LifecycleManager {
     this.#registryPath = options.registryPath ?? defaultRegistryPath();
     this.#runtime = options.runtime ?? new DockerRuntimeController();
     this.#timing = { ...DEFAULT_TIMING, ...options.timing };
+    this.#secrets = options.secrets ?? [];
     this.#onOperationFinished = options.onOperationFinished;
   }
 
@@ -169,9 +190,9 @@ export class LifecycleManager {
   ): Promise<Operation> {
     return this.#serialize(async () => {
       const model = await getRegisteredModel(displayName, this.#registryPath);
-      let launchEnvironment: Record<string, string>;
+      let launchEnvVariables: Record<string, string>;
       try {
-        launchEnvironment = resolveLaunchEnvironment(
+        launchEnvVariables = resolveLaunchEnvVariables(
           model,
           options.launchOptionSelections,
         );
@@ -193,13 +214,15 @@ export class LifecycleManager {
         );
       }
 
-      return this.#launch("start", model, options, requestId, async (operation) => {
+      return this.#launch("start", model, options, launchEnvVariables, requestId, async (operation, log) => {
         for (const conflictingModel of conflictingModels) {
+          log.append("manager", `Stopping conflicting model ${JSON.stringify(conflictingModel.displayName)}.`);
           const result = await this.#runScript(
             conflictingModel,
             "./stop.sh",
             {},
             this.#timing.stopTimeoutMs,
+            log,
           );
           if (result.outcome !== "unavailable") {
             operation.command = commandOf(result.exit);
@@ -216,8 +239,9 @@ export class LifecycleManager {
         const result = await this.#runScript(
           model,
           "./start.sh",
-          launchEnvironment,
+          launchEnvVariables,
           this.#timing.startTimeoutMs,
+          log,
         );
         if (result.outcome === "unavailable") {
           operation.command = null;
@@ -252,12 +276,13 @@ export class LifecycleManager {
       const model = await getRegisteredModel(displayName, this.#registryPath);
       this.#assertIdle(displayName);
 
-      return this.#launch("stop", model, {}, requestId, async (operation) => {
+      return this.#launch("stop", model, {}, {}, requestId, async (operation, log) => {
         const result = await this.#runScript(
           model,
           "./stop.sh",
           {},
           this.#timing.stopTimeoutMs,
+          log,
         );
         if (result.outcome === "unavailable") {
           return {
@@ -289,6 +314,28 @@ export class LifecycleManager {
   getOperation(operationId: string): Operation | undefined {
     const operation = this.#operations.get(operationId);
     return operation && structuredClone(operation);
+  }
+
+  /** The latest operation's log lines with `seq` greater than `after`. */
+  async getLogs(
+    displayName: string,
+    { after = 0, limit = 200 }: { after?: number; limit?: number } = {},
+  ): Promise<ModelLogs> {
+    // sanity check to ensure valid model display name
+    await getRegisteredModel(displayName, this.#registryPath);
+    const record = this.#models.get(displayName);
+    const log = record?.log ?? null;
+    const operation = this.#operationFor(log?.operationId);
+    const page = log
+      ? log.read(after, limit)
+      : { lines: [], nextAfter: 0, truncated: false, hasMore: false };
+    return {
+      displayName,
+      operationId: log?.operationId ?? null,
+      operationKind: operation?.kind ?? null,
+      operationStatus: operation?.status ?? null,
+      ...page,
+    };
   }
 
   async getStatuses(): Promise<ManagedModelStatus[]> {
@@ -375,8 +422,9 @@ export class LifecycleManager {
     kind: OperationKind,
     model: RegisteredModel,
     options: Operation["options"],
+    launchEnvVariables: Readonly<Record<string, string>>,
     requestId: string | null,
-    run: (operation: Operation) => Promise<Failure | null>,
+    run: (operation: Operation, log: OperationLog) => Promise<Failure | null>,
   ): Promise<Operation> {
     let releaseLock: () => Promise<void>;
     try {
@@ -410,6 +458,12 @@ export class LifecycleManager {
     record.desiredState = kind === "start" ? "running" : "stopped";
     record.activeOperationId = operation.operationId;
     record.operationIds.push(operation.operationId);
+    const log = new OperationLog(
+      operation.operationId,
+      record.log?.nextSeq ?? 1,
+      Redactor.fromEnvironment(process.env, launchEnvVariables).with(this.#secrets),
+    );
+    record.log = log;
     this.#operations.set(operation.operationId, operation);
     this.#activeOperationId = operation.operationId;
     this.#prune(record);
@@ -421,7 +475,7 @@ export class LifecycleManager {
       operation.startedAt = new Date().toISOString();
       let failure: Failure | null;
       try {
-        failure = await run(operation);
+        failure = await run(operation, log);
       } catch (error) {
         failure = {
           code: "INTERNAL_ERROR",
@@ -434,14 +488,22 @@ export class LifecycleManager {
       } catch {
         // A lock left behind is removed by the next owner once this process exits.
       }
-      this.#finish(operation, record, failure);
+      if (failure) {
+        log.append("manager", `${operation.kind === "start" ? "Start" : "Stop"} failed (${failure.code}): ${failure.message}`);
+      }
+      this.#finish(operation, record, failure, log);
     })();
     this.#tasks.add(task);
     void task.finally(() => this.#tasks.delete(task));
     return structuredClone(operation);
   }
 
-  #finish(operation: Operation, record: ModelRecord, failure: Failure | null): void {
+  #finish(
+    operation: Operation,
+    record: ModelRecord,
+    failure: Failure | null,
+    log: OperationLog,
+  ): void {
     const at = new Date().toISOString();
     operation.status = failure ? "failed" : "succeeded";
     operation.finishedAt = at;
@@ -450,12 +512,12 @@ export class LifecycleManager {
         operationId: operation.operationId,
         kind: operation.kind,
         code: failure.code,
-        message: failure.message,
+        message: log.redactor.redact(failure.message),
         at,
         exitCode: operation.command?.exitCode ?? null,
         signal: operation.command?.signal ?? null,
         retrySafe: failure.retrySafe,
-        logTail: [],
+        logTail: log.tail(LOG_TAIL_LINES),
       };
       record.lastError = operation.error;
     }
@@ -474,6 +536,7 @@ export class LifecycleManager {
         lastOperationId: null,
         lastError: null,
         operationIds: [],
+        log: null,
       };
       this.#models.set(displayName, record);
     }
@@ -494,6 +557,7 @@ export class LifecycleManager {
     script: string,
     environment: Readonly<Record<string, string>>,
     timeoutMs: number,
+    log: OperationLog,
   ): Promise<ScriptResult> {
     let cwd: string;
     try {
@@ -501,12 +565,12 @@ export class LifecycleManager {
     } catch (error) {
       return { outcome: "unavailable", message: errorMessage(error) };
     }
+    log.append("manager", `Running ${script} for ${JSON.stringify(model.displayName)}.`);
     const launched = launchProcess({
       command: [script],
       cwd,
       env: { ...process.env, ...environment },
-      // Output is discarded until Layer 3 adds logs.
-      onLine: () => undefined,
+      onLine: (stream, line) => log.append(stream, line),
     });
     this.#processes.add(launched);
     let timer: NodeJS.Timeout | undefined;
@@ -515,16 +579,21 @@ export class LifecycleManager {
         timer = setTimeout(() => resolve("timeout"), timeoutMs);
       });
       const first = await Promise.race([launched.exited, timedOut]);
-      if (first === "timeout") {
-        return {
-          outcome: "timeout",
-          exit: await launched.terminate(this.#timing.killGraceMs),
-        };
-      }
-      if (first.spawnError !== null) {
-        return { outcome: "unavailable", message: first.spawnError };
-      }
-      return { outcome: "exited", exit: first };
+      const result: ScriptResult =
+        first === "timeout"
+          ? { outcome: "timeout", exit: await launched.terminate(this.#timing.killGraceMs) }
+          : first.spawnError !== null
+            ? { outcome: "unavailable", message: first.spawnError }
+            : { outcome: "exited", exit: first };
+      log.append(
+        "manager",
+        result.outcome === "unavailable"
+          ? `${script} could not be run: ${result.message}`
+          : result.outcome === "timeout"
+            ? `${script} did not finish within ${formatDuration(timeoutMs)} and was terminated.`
+            : `${script} ${describeScriptResult(result, script)}.`,
+      );
+      return result;
     } finally {
       clearTimeout(timer);
       this.#processes.delete(launched);
